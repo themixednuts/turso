@@ -7299,6 +7299,7 @@ dependencies = [
  "turso_core",
  "turso_sync_engine",
  "validator",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7743,6 +7744,7 @@ dependencies = [
  "turso_pg",
  "turso_pg_server",
  "validator",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
