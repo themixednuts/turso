@@ -5825,8 +5825,7 @@ impl Index {
                         bail_parse_error!("custom index module do not support UNIQUE indices");
                     }
                     let parameters = resolve_index_method_parameters(with_clause)?;
-                    let Some(module) = syms.index_methods.get(IdentKeyStr::new(using.as_str()))
-                    else {
+                    let Some(module) = syms.index_methods.get(using.as_key_str()) else {
                         bail_parse_error!("unknown module name: '{}'", using);
                     };
                     let configuration = IndexMethodConfiguration {

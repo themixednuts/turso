@@ -51,6 +51,22 @@ expect {
 }
 
 @cross-check-integrity
+test alter-table-rename-column-uses-sqlite-quoting {
+    CREATE TABLE QuoteSource (OldColumn, PRIMARY KEY (OldColumn), UNIQUE (OldColumn));
+    CREATE TRIGGER QuoteTrigger AFTER INSERT ON QuoteSource BEGIN SELECT new.OldColumn; END;
+    ALTER TABLE QuoteSource RENAME COLUMN OldColumn TO [New Column];
+    SELECT instr(sql, '[New Column]') = 0,
+           instr(sql, '"New Column"') > 0
+    FROM sqlite_schema
+    WHERE type IN ('table', 'trigger')
+    ORDER BY type;
+}
+expect {
+    1|1
+    1|1
+}
+
+@cross-check-integrity
 test alter-table-rename-then-recreate-with-autoindex {
     CREATE TABLE new_t (a integer, b integer UNIQUE, PRIMARY KEY (a));
     ALTER TABLE new_t RENAME TO t;

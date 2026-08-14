@@ -10848,22 +10848,23 @@ pub fn op_function(
                     (new_name, new_tbl_name, new_sql)
                 }
                 AlterTableFunc::AlterColumn { .. } | AlterTableFunc::RenameColumn { .. } => {
-                    let (table, rename_from, column_def, rename) = match alter_func {
+                    let normalized_column_name;
+                    let (table, rename_from, column_def, new_column_name) = match alter_func {
                         AlterTableFunc::AlterColumn {
                             table,
                             column,
                             definition,
-                        } => (table, column, definition.as_ref().clone(), false),
-                        AlterTableFunc::RenameColumn { table, from, to } => (
-                            table,
-                            from,
-                            ast::ColumnDefinition {
-                                col_name: to.clone(),
-                                col_type: None,
-                                constraints: vec![],
-                            },
-                            true,
-                        ),
+                        } => {
+                            normalized_column_name =
+                                Name::from_unquoted(definition.col_name.as_str());
+                            (
+                                table,
+                                column,
+                                Some(definition.as_ref()),
+                                &normalized_column_name,
+                            )
+                        }
+                        AlterTableFunc::RenameColumn { table, from, to } => (table, from, None, to),
                         AlterTableFunc::RenameTable { .. } => unreachable!(),
                     };
 
@@ -10904,7 +10905,7 @@ pub fn op_function(
                                     rename_identifiers(
                                         column.expr.as_mut(),
                                         rename_from.as_str(),
-                                        column_def.col_name.as_str(),
+                                        new_column_name.as_str(),
                                     );
                                 }
 
@@ -10912,7 +10913,7 @@ pub fn op_function(
                                     rename_identifiers(
                                         wc,
                                         rename_from.as_str(),
-                                        column_def.col_name.as_str(),
+                                        new_column_name.as_str(),
                                     );
                                 }
 
@@ -10960,10 +10961,10 @@ pub fn op_function(
                                         break 'sql None;
                                     };
 
-                                    if rename {
-                                        column.col_name = column_def.col_name.clone();
-                                    } else {
+                                    if let Some(column_def) = column_def {
                                         *column = column_def.clone();
+                                    } else {
+                                        column.col_name = new_column_name.clone();
                                     }
 
                                     // Update table-level constraints (PRIMARY KEY, UNIQUE, FOREIGN KEY)
@@ -10980,10 +10981,9 @@ pub fn op_function(
                                                         return Err(LimboError::ParseError("Unexpected expression in PRIMARY KEY constraint".to_string()));
                                                     };
                                                     if name == rename_from {
-                                                        *col.expr =
-                                                            ast::Expr::Name(Name::from_unquoted(
-                                                                column_def.col_name.as_str(),
-                                                            ));
+                                                        *col.expr = ast::Expr::Name(
+                                                            new_column_name.clone(),
+                                                        );
                                                     }
                                                 }
                                             }
@@ -10998,10 +10998,9 @@ pub fn op_function(
                                                         return Err(LimboError::ParseError("Unexpected expression in UNIQUE constraint".to_string()));
                                                     };
                                                     if name == rename_from {
-                                                        *col.expr =
-                                                            ast::Expr::Name(Name::from_unquoted(
-                                                                column_def.col_name.as_str(),
-                                                            ));
+                                                        *col.expr = ast::Expr::Name(
+                                                            new_column_name.clone(),
+                                                        );
                                                     }
                                                 }
                                             }
@@ -11013,16 +11012,15 @@ pub fn op_function(
                                                 // Update child columns in this table's FK definitions
                                                 for child_col in child_cols {
                                                     if child_col.col_name == rename_from {
-                                                        child_col.col_name = Name::from_unquoted(
-                                                            column_def.col_name.as_str(),
-                                                        );
+                                                        child_col.col_name =
+                                                            new_column_name.clone();
                                                     }
                                                 }
                                                 rewrite_fk_parent_cols_if_self_ref(
                                                     clause,
                                                     table.as_str(),
                                                     rename_from.as_str(),
-                                                    column_def.col_name.as_str(),
+                                                    new_column_name.as_str(),
                                                 );
                                             }
                                             ast::TableConstraint::Check {
@@ -11032,7 +11030,7 @@ pub fn op_function(
                                                 rename_identifiers(
                                                     expr,
                                                     rename_from.as_str(),
-                                                    column_def.col_name.as_str(),
+                                                    new_column_name.as_str(),
                                                 );
                                                 *source = None;
                                             }
@@ -11044,7 +11042,7 @@ pub fn op_function(
                                             col,
                                             table.as_str(),
                                             rename_from.as_str(),
-                                            column_def.col_name.as_str(),
+                                            new_column_name.as_str(),
                                         )?;
                                     }
                                 } else {
@@ -11068,9 +11066,8 @@ pub fn op_function(
                                                 // Update parent column references if they match the renamed column
                                                 for parent_col in parent_cols {
                                                     if parent_col.col_name == rename_from {
-                                                        parent_col.col_name = Name::from_unquoted(
-                                                            column_def.col_name.as_str(),
-                                                        );
+                                                        parent_col.col_name =
+                                                            new_column_name.clone();
                                                         fk_updated = true;
                                                     }
                                                 }
@@ -11084,7 +11081,7 @@ pub fn op_function(
                                             &mut local_col,
                                             table.as_str(),
                                             rename_from.as_str(),
-                                            column_def.col_name.as_str(),
+                                            new_column_name.as_str(),
                                         );
                                         if local_col != *col {
                                             *col = local_col;
@@ -16219,7 +16216,7 @@ pub fn op_alter_column(
             .clone()
     });
     let new_column = crate::schema::Column::try_from(definition.as_ref())?;
-    let new_name = definition.col_name.as_str().to_owned();
+    let new_name = definition.col_name.as_str();
 
     let view_rewrites: Vec<(usize, String, RewrittenView)> = if *rename {
         let target_db_name = conn.get_database_name_by_index(*db).ok_or_else(|| {
@@ -16236,7 +16233,7 @@ pub fn op_alter_column(
                         table_name.as_str(),
                         &target_db_name,
                         &old_column_name,
-                        &new_name,
+                        new_name,
                     )? {
                         rewrites.push((*db, view_name.to_string(), rewritten));
                     }
@@ -16257,7 +16254,7 @@ pub fn op_alter_column(
                             table_name.as_str(),
                             &target_db_name,
                             &old_column_name,
-                            &new_name,
+                            new_name,
                         )? {
                             rewrites.push((crate::TEMP_DB_ID, view_name.to_string(), rewritten));
                         }
@@ -16299,15 +16296,15 @@ pub fn op_alter_column(
                 let idx = Arc::make_mut(idx);
                 for ic in &mut idx.columns {
                     if let Some(expr) = &mut ic.expr {
-                        rename_identifiers(expr.as_mut(), &old_column_name, &new_name);
+                        rename_identifiers(expr.as_mut(), &old_column_name, new_name);
                         ic.name = expr.to_string();
                     } else if ic.name.eq_ignore_ascii_case(&existing_column_name) {
-                        ic.name.clone_from(&new_name);
+                        new_name.clone_into(&mut ic.name);
                     }
                 }
                 // Update partial index WHERE clause column references
                 if let Some(ref mut wc) = idx.where_clause {
-                    rename_identifiers(wc, &old_column_name, &new_name);
+                    rename_identifiers(wc, &old_column_name, new_name);
                 }
             }
         }
@@ -16320,7 +16317,7 @@ pub fn op_alter_column(
             && !new_column.is_rowid_alias();
 
         if *rename {
-            btree.columns_mut()[*column_index].name = Some(new_name.clone());
+            btree.columns_mut()[*column_index].name = Some(new_name.to_owned());
 
             // Refresh the cached sql in generated columns
             let column_count = btree.columns().len();
@@ -16343,7 +16340,7 @@ pub fn op_alter_column(
         // Keep primary_key_columns consistent (names may change on rename)
         for (pk_name, _ord) in &mut btree.primary_key_columns {
             if pk_name.eq_ignore_ascii_case(&old_column_name) {
-                pk_name.clone_from(&new_name);
+                new_name.clone_into(pk_name);
             }
         }
 
@@ -16351,20 +16348,20 @@ pub fn op_alter_column(
         for unique_set in &mut btree.unique_sets {
             for unique_column in &mut unique_set.columns {
                 if unique_column.name.eq_ignore_ascii_case(&old_column_name) {
-                    unique_column.name.clone_from(&new_name);
+                    new_name.clone_into(&mut unique_column.name);
                 }
             }
         }
 
         // Update CHECK constraint expressions to reference the new column name
         for check in &mut btree.check_constraints {
-            rename_identifiers(&mut check.expr, &old_column_name, &new_name);
+            rename_identifiers(&mut check.expr, &old_column_name, new_name);
             // The captured source text no longer matches the rewritten
             // expression.
             check.source = None;
             if let Some(ref mut col) = check.column {
                 if col.eq_ignore_ascii_case(&old_column_name) {
-                    col.clone_from(&new_name);
+                    new_name.clone_into(col);
                 }
             }
         }
@@ -16384,14 +16381,14 @@ pub fn op_alter_column(
             // child side: rename child column if it matches
             for cc in &mut fk.child_columns {
                 if cc.eq_ignore_ascii_case(&old_column_name) {
-                    cc.clone_from(&new_name);
+                    new_name.clone_into(cc);
                 }
             }
             // parent side: if self-referencing, rename parent column too
             if table_name == fk.parent_table.as_str() {
                 for pc in &mut fk.parent_columns {
                     if pc.eq_ignore_ascii_case(&old_column_name) {
-                        pc.clone_from(&new_name);
+                        new_name.clone_into(pc);
                     }
                 }
             }
@@ -16411,7 +16408,7 @@ pub fn op_alter_column(
                     let fk = Arc::make_mut(fk_arc);
                     for pc in &mut fk.parent_columns {
                         if pc.eq_ignore_ascii_case(&old_column_name) {
-                            pc.clone_from(&new_name);
+                            new_name.clone_into(pc);
                         }
                     }
                 }
@@ -16431,7 +16428,7 @@ pub fn op_alter_column(
                         trigger,
                         table_name.as_str(),
                         &old_column_name,
-                        &new_name,
+                        new_name,
                     )?;
                 }
             }
