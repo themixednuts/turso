@@ -306,6 +306,30 @@ fn test_postgres_create_schema_if_not_exists(db: TempDatabase) {
 }
 
 #[turso_macros::test]
+fn test_postgres_schema_names_only_fold_ascii(db: TempDatabase) {
+    let conn = db.connect_postgres();
+
+    conn.execute("CREATE SCHEMA MixedCase").unwrap();
+    assert!(conn.execute("CREATE SCHEMA mixedcase").is_err());
+
+    conn.execute("CREATE SCHEMA Ä").unwrap();
+    conn.execute("CREATE SCHEMA ä").unwrap();
+    conn.execute("CREATE TABLE Ä.same_name (value INTEGER)")
+        .unwrap();
+    conn.execute("CREATE TABLE ä.same_name (value INTEGER)")
+        .unwrap();
+}
+
+#[turso_macros::test]
+fn test_postgres_drop_schema_with_quote_in_name(db: TempDatabase) {
+    let conn = db.connect_postgres();
+
+    conn.execute("CREATE SCHEMA \"a\"\"b\"").unwrap();
+    conn.execute("DROP SCHEMA \"a\"\"b\"").unwrap();
+    conn.execute("CREATE SCHEMA \"a\"\"b\"").unwrap();
+}
+
+#[turso_macros::test]
 fn test_postgres_create_schema_public_error(db: TempDatabase) {
     let conn = db.connect_postgres();
 

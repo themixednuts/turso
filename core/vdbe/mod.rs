@@ -112,7 +112,7 @@ type MvccCommitStateMachine = CommitStateMachine<MvccClock, DynAllocator>;
 pub enum ViewDeltaCommitState {
     NotStarted,
     Processing {
-        views: Vec<String>, // view names (all materialized views have storage)
+        views: Vec<crate::IdentKey>, // view names (all materialized views have storage)
         current_index: usize,
     },
     Done,
@@ -2026,7 +2026,7 @@ impl Program {
                     // Collect materialized views - they should all have storage
                     let mut views = Vec::new();
                     for view_name in self.connection.view_transaction_states.get_view_names() {
-                        if let Some(view_mutex) = schema.get_materialized_view(&view_name) {
+                        if let Some(view_mutex) = schema.get_materialized_view(view_name.as_str()) {
                             let view = view_mutex.lock();
                             let root_page = view.get_root_page();
 
@@ -2064,18 +2064,18 @@ impl Program {
                     let table_deltas = self
                         .connection
                         .view_transaction_states
-                        .get(view_name)
+                        .get(view_name.as_str())
                         .expect("view should have transaction state")
                         .get_table_deltas();
 
                     let schema = self.connection.schema.read();
-                    if let Some(view_mutex) = schema.get_materialized_view(view_name) {
+                    if let Some(view_mutex) = schema.get_materialized_view(view_name.as_str()) {
                         let mut view = view_mutex.lock();
 
                         // Create a DeltaSet from the per-table deltas
                         let mut delta_set = crate::incremental::compiler::DeltaSet::new();
                         for (table_name, delta) in table_deltas {
-                            delta_set.insert(table_name, delta);
+                            delta_set.insert_key(table_name, delta);
                         }
 
                         // Handle I/O from merge_delta - pass pager, circuit will create its own cursor

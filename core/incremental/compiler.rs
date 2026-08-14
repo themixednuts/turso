@@ -25,6 +25,7 @@ use crate::translate::logical::{
 use crate::types::{IOResult, ImmutableRecord, SeekKey, SeekOp, SeekResult, Value};
 use crate::Pager;
 use crate::{return_and_restore_if_io, return_if_io, LimboError, Result};
+use crate::{IdentKey, IdentKeyStr};
 use rustc_hash::FxHashMap as HashMap;
 use std::fmt::{self, Display, Formatter};
 
@@ -239,7 +240,7 @@ pub enum ExecuteState {
 #[derive(Debug, Clone, Default)]
 pub struct DeltaSet {
     /// Deltas keyed by table/operator name
-    deltas: HashMap<String, Delta>,
+    deltas: HashMap<IdentKey, Delta>,
 }
 
 impl DeltaSet {
@@ -259,25 +260,31 @@ impl DeltaSet {
 
     /// Create a DeltaSet from a HashMap
     pub fn from_map(deltas: HashMap<String, Delta>) -> Self {
-        Self { deltas }
+        Self {
+            deltas: deltas
+                .into_iter()
+                .map(|(name, delta)| (IdentKey::from_unquoted(&name), delta))
+                .collect(),
+        }
     }
 
     /// Add a delta for a table
-    pub fn insert(&mut self, table_name: String, delta: Delta) {
+    pub fn insert(&mut self, table_name: impl AsRef<str>, delta: Delta) {
+        self.deltas
+            .insert(IdentKey::from_unquoted(table_name.as_ref()), delta);
+    }
+
+    /// Inserts a delta without rebuilding an existing identifier key.
+    pub fn insert_key(&mut self, table_name: crate::IdentKey, delta: Delta) {
         self.deltas.insert(table_name, delta);
     }
 
     /// Get delta for a table, returns empty delta if not found
     pub fn get(&self, table_name: &str) -> Delta {
         self.deltas
-            .get(table_name)
+            .get(IdentKeyStr::new(table_name))
             .cloned()
             .unwrap_or_else(Delta::new)
-    }
-
-    /// Convert DeltaSet into the underlying HashMap
-    pub fn into_map(self) -> HashMap<String, Delta> {
-        self.deltas
     }
 
     /// Check if all deltas in the set are empty
@@ -530,9 +537,18 @@ impl DbspCircuit {
     /// # Arguments
     /// * `input_data` - The deltas to commit (same as what was passed to execute)
     /// * `pager` - Pager for creating cursors to the btrees
+    #[cfg(test)]
     pub fn commit(
         &mut self,
         input_data: HashMap<String, Delta>,
+        pager: Arc<Pager>,
+    ) -> Result<IOResult<Delta>> {
+        self.commit_delta_set(DeltaSet::from_map(input_data), pager)
+    }
+
+    pub(crate) fn commit_delta_set(
+        &mut self,
+        input_delta_set: DeltaSet,
         pager: Arc<Pager>,
     ) -> Result<IOResult<Delta>> {
         // No root means nothing to commit
@@ -545,9 +561,6 @@ impl DbspCircuit {
 
         // Add 1 for the weight column that we store in the btree
         let num_columns = self.output_schema.columns.len() + 1;
-
-        // Convert input_data to DeltaSet once, outside the loop
-        let input_delta_set = DeltaSet::from_map(input_data);
 
         loop {
             // Take ownership of the state for processing, to avoid borrow checker issues (we have
@@ -1723,7 +1736,7 @@ impl DbspCompiler {
                     .collect();
                 let ast_args: Vec<Box<ast::Expr>> = ast_args?.into_iter().map(Box::new).collect();
                 Ok(ast::Expr::FunctionCall {
-                    name: ast::Name::exact(fun.clone()),
+                    name: ast::Name::exact_ref(fun),
                     distinctness: None,
                     args: ast_args,
                     order_by: Vec::new(),
@@ -1765,7 +1778,7 @@ impl DbspCompiler {
                 };
 
                 Ok(ast::Expr::FunctionCall {
-                    name: ast::Name::exact(func_name.to_string()),
+                    name: ast::Name::exact_ref(func_name),
                     distinctness: if *distinct {
                         Some(ast::Distinctness::Distinct)
                     } else {
@@ -2301,6 +2314,17 @@ mod tests {
     use rustc_hash::FxHashSet as HashSet;
     use turso_parser::ast;
     use turso_parser::parser::Parser;
+
+    #[test]
+    fn delta_set_uses_sqlite_identifier_keys() {
+        let mut delta = Delta::new();
+        delta.insert(1, vec![Value::from_i64(1)]);
+
+        let mut deltas = DeltaSet::new();
+        deltas.insert("Users", delta);
+
+        assert!(!deltas.get("users").is_empty());
+    }
 
     // Macro to create a test schema with a users table
     macro_rules! test_schema {

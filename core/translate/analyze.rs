@@ -9,7 +9,6 @@ use crate::{
         emitter::Resolver,
         schema::{emit_schema_entry, SchemaEntryType, SQLITE_TABLEID},
     },
-    util::normalize_ident,
     vdbe::{
         affinity::Affinity,
         builder::{CursorType, ProgramBuilder},
@@ -36,12 +35,12 @@ fn resolve_analyze_targets(
 ) -> Result<(usize, Vec<AnalyzeTarget>)> {
     match target_opt {
         Some(target) => {
-            let normalized = normalize_ident(target.name.as_str());
+            let normalized = target.name.to_key();
 
             // If db_name is specified, resolve to that database
             if let Some(db_name) = &target.db_name {
                 let database_id = resolver.resolve_database_id(target)?;
-                let db_normalized = normalize_ident(db_name.as_str());
+                let db_normalized = db_name.to_key();
 
                 // "ANALYZE db.table" — the name part is the table/index
                 // But first check if the name is actually a database name too (shouldn't be with db_name set)

@@ -651,7 +651,7 @@ mod tests {
             BTreeTable::from_sql("CREATE TABLE sqlite_sequence(name)", seq_root_page)
                 .expect("malformed sqlite_sequence SQL should parse");
         schema.tables.insert(
-            SQLITE_SEQUENCE_TABLE_NAME.to_string(),
+            crate::IdentKey::from_unquoted(SQLITE_SEQUENCE_TABLE_NAME),
             Arc::new(Table::BTree(Arc::new(malformed_seq))),
         );
 
@@ -697,7 +697,9 @@ mod tests {
             .unwrap();
 
         let mut schema = db.schema.lock().as_ref().try_clone().unwrap();
-        schema.tables.remove(SQLITE_SEQUENCE_TABLE_NAME);
+        schema
+            .tables
+            .remove(crate::IdentKeyStr::new(SQLITE_SEQUENCE_TABLE_NAME));
 
         let pager = conn.pager.load().clone();
         let syms = SymbolTable::new();

@@ -47,7 +47,6 @@ use crate::{
         },
         ProgramBuilder,
     },
-    util::normalize_ident,
     vdbe::{
         affinity::Affinity,
         builder::{CursorKey, CursorType, DmlColumnContext},
@@ -1524,10 +1523,10 @@ fn emit_update_insns<'a>(
     if let Table::BTree(ref btree) = target_table.table {
         let has_check_constraints = !btree.check_constraints.is_empty();
         let cols = btree.columns();
-        let virtual_col_names: HashSet<String> = cols
+        let virtual_col_names: HashSet<crate::IdentKey> = cols
             .iter()
             .filter(|c| c.is_virtual_generated())
-            .filter_map(|c| c.name.as_ref().map(|n| normalize_ident(n)))
+            .filter_map(|c| c.name.as_deref().map(crate::IdentKey::from_unquoted))
             .collect();
         let expr_references_virtual = |expr: &ast::Expr| {
             !virtual_col_names.is_empty()
@@ -1702,13 +1701,13 @@ fn emit_update_insns<'a>(
         if !btree_table.check_constraints.is_empty() {
             // SQLite only evaluates CHECK constraints that reference at least one
             // column in the SET clause. Build a set of updated column names to filter.
-            let mut updated_col_names: HashSet<String> = btree_table
+            let mut updated_col_names: HashSet<crate::IdentKey> = btree_table
                 .columns()
                 .iter()
                 .enumerate()
                 .filter(|(idx, _)| affected_columns.get(*idx))
                 .filter_map(|(_, col)| col.name.as_deref())
-                .map(normalize_ident)
+                .map(crate::IdentKey::from_unquoted)
                 .collect();
 
             // If the rowid is being updated (either directly via ROWID_SENTINEL or
@@ -1716,7 +1715,7 @@ fn emit_update_insns<'a>(
             // names so that CHECK(rowid > 0) etc. are properly triggered.
             if updates_rowid {
                 for name in ROWID_STRS {
-                    updated_col_names.insert(name.to_string());
+                    updated_col_names.insert(crate::IdentKey::from_unquoted(name));
                 }
             }
 

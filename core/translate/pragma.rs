@@ -22,7 +22,7 @@ use crate::storage::sqlite3_ondisk::CacheSize;
 use crate::storage::wal::CheckpointMode;
 use crate::translate::emitter::{Resolver, TransactionMode};
 use crate::translate::plan::BitSet;
-use crate::util::{normalize_ident, parse_signed_number, parse_string, IOExt as _};
+use crate::util::{parse_signed_number, parse_string, IOExt as _};
 use crate::vdbe::builder::{ProgramBuilder, ProgramBuilderOpts};
 use crate::vdbe::insn::{Cookie, Insn};
 use crate::{bail_parse_error, CaptureDataChangesInfo, LimboError, Numeric, Value};
@@ -74,16 +74,16 @@ fn display_table_list_name(database_id: usize, name: &str) -> String {
     }
 }
 
-fn normalize_table_pragma_lookup_name(database_id: usize, name: &str) -> String {
-    let normalized = normalize_ident(name);
+fn table_pragma_lookup_name(database_id: usize, name: &str) -> &str {
+    let normalized = crate::IdentKeyStr::new(name);
     if (database_id == crate::TEMP_DB_ID
-        && (normalized.eq_ignore_ascii_case(crate::schema::TEMP_SCHEMA_TABLE_NAME)
-            || normalized.eq_ignore_ascii_case(crate::schema::TEMP_SCHEMA_TABLE_NAME_ALT)))
-        || normalized.eq_ignore_ascii_case(crate::schema::SCHEMA_TABLE_NAME_ALT)
+        && (normalized == crate::schema::TEMP_SCHEMA_TABLE_NAME
+            || normalized == crate::schema::TEMP_SCHEMA_TABLE_NAME_ALT))
+        || normalized == crate::schema::SCHEMA_TABLE_NAME_ALT
     {
-        crate::schema::SCHEMA_TABLE_NAME.to_string()
+        crate::schema::SCHEMA_TABLE_NAME
     } else {
-        normalized
+        name
     }
 }
 
@@ -117,7 +117,7 @@ fn resolve_index_pragma_database_id(
 
     let qualified_name = ast::QualifiedName {
         db_name: None,
-        name: ast::Name::exact(index_name.to_string()),
+        name: ast::Name::exact_ref(index_name),
         alias: None,
     };
     resolver.resolve_existing_index_database_id(&qualified_name)
@@ -157,8 +157,8 @@ fn emit_table_list_rows_for_schema(
     };
 
     if let Some(filter_name) = filter_name {
-        let lookup_name = normalize_table_pragma_lookup_name(database_id, filter_name);
-        if let Some(table) = schema.get_table(&lookup_name) {
+        let lookup_name = table_pragma_lookup_name(database_id, filter_name);
+        if let Some(table) = schema.get_table(lookup_name) {
             let (wr, strict) = match table.btree() {
                 Some(bt) => (!bt.has_rowid, bt.is_strict),
                 None => (false, false),
@@ -171,7 +171,7 @@ fn emit_table_list_rows_for_schema(
                 wr,
                 strict,
             );
-        } else if let Some(view) = schema.get_view(&lookup_name) {
+        } else if let Some(view) = schema.get_view(lookup_name) {
             emit_table_row(
                 program,
                 &view.name,
@@ -912,8 +912,7 @@ fn query_pragma(
                 || connection.experimental_mvcc_passive_checkpoint_enabled();
             let mode = match value {
                 Some(ast::Expr::Name(name)) => {
-                    let mode_name = normalize_ident(name.as_str());
-                    let mode = CheckpointMode::from_str(&mode_name).map_err(|e| {
+                    let mode = CheckpointMode::from_str(name.as_str()).map_err(|e| {
                         LimboError::ParseError(format!("Unknown Checkpoint Mode: {e}"))
                     })?;
                     if matches!(mode, CheckpointMode::Passive { .. }) && !passive_allowed {
@@ -1022,7 +1021,7 @@ fn query_pragma(
         }
         PragmaName::IndexInfo => {
             let index_name = match value {
-                Some(ast::Expr::Name(name)) => Some(normalize_ident(name.as_str())),
+                Some(ast::Expr::Name(name)) => Some(name.as_str().to_owned()),
                 _ => None,
             };
 
@@ -1063,7 +1062,7 @@ fn query_pragma(
         }
         PragmaName::IndexXinfo => {
             let index_name = match value {
-                Some(ast::Expr::Name(name)) => Some(normalize_ident(name.as_str())),
+                Some(ast::Expr::Name(name)) => Some(name.as_str().to_owned()),
                 _ => None,
             };
 
@@ -1125,7 +1124,7 @@ fn query_pragma(
         }
         PragmaName::IndexList => {
             let table_name = match value {
-                Some(ast::Expr::Name(name)) => Some(normalize_ident(name.as_str())),
+                Some(ast::Expr::Name(name)) => Some(name.as_str().to_owned()),
                 _ => None,
             };
 
@@ -1254,7 +1253,7 @@ fn query_pragma(
         }
         PragmaName::TableList => {
             let name = match value {
-                Some(ast::Expr::Name(name)) => Some(normalize_ident(name.as_str())),
+                Some(ast::Expr::Name(name)) => Some(name.as_str().to_owned()),
                 _ => None,
             };
 
@@ -1291,7 +1290,7 @@ fn query_pragma(
         }
         PragmaName::TableInfo => {
             let name = match value {
-                Some(ast::Expr::Name(name)) => Some(normalize_ident(name.as_str())),
+                Some(ast::Expr::Name(name)) => Some(name.as_str().to_owned()),
                 _ => None,
             };
 
@@ -1305,9 +1304,9 @@ fn query_pragma(
                     schema_was_explicit,
                     &name,
                 )?;
-                let lookup_name = normalize_table_pragma_lookup_name(table_database_id, &name);
+                let lookup_name = table_pragma_lookup_name(table_database_id, &name);
                 resolver.with_schema(table_database_id, |db_schema| {
-                    if let Some(table) = db_schema.get_table(&lookup_name) {
+                    if let Some(table) = db_schema.get_table(lookup_name) {
                         let primary_key_columns = match table.as_ref() {
                             Table::BTree(bt) => Some(bt.primary_key_columns.as_slice()),
                             _ => None,
@@ -1319,7 +1318,7 @@ fn query_pragma(
                             base_reg,
                             false,
                         );
-                    } else if let Some(view_mutex) = db_schema.get_materialized_view(&lookup_name) {
+                    } else if let Some(view_mutex) = db_schema.get_materialized_view(lookup_name) {
                         let view = view_mutex.lock();
                         let flat_columns = view.column_schema.flat_columns();
                         emit_columns_for_table_info(
@@ -1331,7 +1330,7 @@ fn query_pragma(
                             base_reg,
                             false,
                         );
-                    } else if let Some(view) = db_schema.get_view(&lookup_name) {
+                    } else if let Some(view) = db_schema.get_view(lookup_name) {
                         emit_columns_for_table_info(
                             program,
                             &view.columns,
@@ -1351,7 +1350,7 @@ fn query_pragma(
         }
         PragmaName::TableXinfo => {
             let name = match value {
-                Some(ast::Expr::Name(name)) => Some(normalize_ident(name.as_str())),
+                Some(ast::Expr::Name(name)) => Some(name.as_str().to_owned()),
                 _ => None,
             };
 
@@ -1365,9 +1364,9 @@ fn query_pragma(
                     schema_was_explicit,
                     &name,
                 )?;
-                let lookup_name = normalize_table_pragma_lookup_name(table_database_id, &name);
+                let lookup_name = table_pragma_lookup_name(table_database_id, &name);
                 resolver.with_schema(table_database_id, |db_schema| {
-                    if let Some(table) = db_schema.get_table(&lookup_name) {
+                    if let Some(table) = db_schema.get_table(lookup_name) {
                         let primary_key_columns = match table.as_ref() {
                             Table::BTree(bt) => Some(bt.primary_key_columns.as_slice()),
                             _ => None,
@@ -1379,7 +1378,7 @@ fn query_pragma(
                             base_reg,
                             true,
                         );
-                    } else if let Some(view_mutex) = db_schema.get_materialized_view(&lookup_name) {
+                    } else if let Some(view_mutex) = db_schema.get_materialized_view(lookup_name) {
                         let view = view_mutex.lock();
                         let flat_columns = view.column_schema.flat_columns();
                         emit_columns_for_table_info(
@@ -1391,7 +1390,7 @@ fn query_pragma(
                             base_reg,
                             true,
                         );
-                    } else if let Some(view) = db_schema.get_view(&lookup_name) {
+                    } else if let Some(view) = db_schema.get_view(lookup_name) {
                         emit_columns_for_table_info(
                             program,
                             &view.columns,
@@ -1704,7 +1703,7 @@ fn query_pragma(
                 let mut type_names: Vec<_> = schema
                     .type_registry
                     .iter()
-                    .filter(|(key, td)| *key == &td.name.to_lowercase())
+                    .filter(|(key, td)| *key == &td.name)
                     .map(|(key, _)| key)
                     .collect();
                 type_names.sort();

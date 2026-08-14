@@ -99,7 +99,10 @@ impl AvailableIndexes {
                 continue;
             }
             let indexes = resolver.with_schema(table_ref.database_id, |schema| {
-                schema.indexes.get(table_ref.table.get_name()).cloned()
+                schema
+                    .indexes
+                    .get(crate::IdentKeyStr::new(table_ref.table.get_name()))
+                    .cloned()
             });
             if let Some(indexes) = indexes {
                 available_indexes
@@ -757,7 +760,7 @@ fn transform_match_to_fts_match(
                     args.push(rhs.clone());
 
                     let func_call = Expr::FunctionCall {
-                        name: Name::exact("fts_match".to_string()),
+                        name: Name::exact_ref("fts_match"),
                         distinctness: None,
                         args,
                         order_by: vec![],
@@ -4135,7 +4138,7 @@ mod tests {
 
     fn fn_call(name: &str, args: Vec<Expr>) -> Expr {
         Expr::FunctionCall {
-            name: Name::exact(name.to_string()),
+            name: Name::exact_ref(name),
             distinctness: None,
             args: args.into_iter().map(Box::new).collect(),
             order_by: vec![],

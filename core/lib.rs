@@ -167,6 +167,7 @@ pub use turso_macros::{
     turso_assert_sometimes_less_than, turso_assert_sometimes_less_than_or_equal,
     turso_assert_unreachable, turso_debug_assert, turso_soft_unreachable,
 };
+use turso_parser::{IdentKey, IdentKeyStr};
 pub use types::{IOResult, Value, ValueBlob, ValueRef};
 pub use util::IOExt;
 pub use vdbe::{

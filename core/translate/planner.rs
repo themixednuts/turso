@@ -20,13 +20,7 @@ use crate::translate::{
     },
     plan::{NonFromClauseSubquery, SubqueryState},
 };
-use crate::{
-    ast::Limit,
-    function::Func,
-    schema::Table,
-    util::{exprs_are_equivalent, normalize_ident},
-    Result,
-};
+use crate::{ast::Limit, function::Func, schema::Table, util::exprs_are_equivalent, Result};
 use crate::{
     function::{AccumulatorFunc, AggFunc, ExtFunc, WindowFunc},
     translate::expr::bind_and_rewrite_expr,
@@ -50,7 +44,7 @@ struct CteDefinition {
     /// Identifies materialized results shared by references to this CTE.
     cte_id: usize,
     /// Normalized CTE name.
-    name: String,
+    name: crate::IdentKey,
     /// SELECT syntax used to build a plan for each reference.
     select: Select,
     /// Explicit column names from `WITH t(a, b) AS (...)`.
@@ -68,7 +62,7 @@ fn collect_cte_definitions(with: With, program: &mut ProgramBuilder) -> Result<V
     let mut referenced_table_names_by_cte = Vec::with_capacity(with.ctes.len());
 
     for cte in with.ctes {
-        let name = normalize_ident(cte.tbl_name.as_str());
+        let name = cte.tbl_name.to_key();
         if definitions
             .iter()
             .any(|definition: &CteDefinition| definition.name == name)
@@ -89,7 +83,7 @@ fn collect_cte_definitions(with: With, program: &mut ProgramBuilder) -> Result<V
             explicit_columns: cte
                 .columns
                 .iter()
-                .map(|column| normalize_ident(column.col_name.as_str()))
+                .map(|column| String::from(column.col_name.to_key()))
                 .collect(),
             referenced_cte_indices: SmallVec::new(),
             materialize_hint: cte.materialized == Materialized::Yes,
@@ -112,19 +106,19 @@ fn collect_cte_definitions(with: With, program: &mut ProgramBuilder) -> Result<V
 
 /// Collect all table names referenced in a SELECT's FROM clause.
 /// Used to determine which earlier CTEs a CTE directly depends on.
-fn collect_from_clause_table_refs(select: &Select, out: &mut Vec<String>) {
+fn collect_from_clause_table_refs(select: &Select, out: &mut Vec<crate::IdentKey>) {
     collect_from_select_body(&select.body, out);
     collect_subquery_table_refs_in_select_exprs(select, out);
 }
 
-fn collect_from_select_body(body: &ast::SelectBody, out: &mut Vec<String>) {
+fn collect_from_select_body(body: &ast::SelectBody, out: &mut Vec<crate::IdentKey>) {
     collect_from_one_select(&body.select, out);
     for compound in &body.compounds {
         collect_from_one_select(&compound.select, out);
     }
 }
 
-fn collect_from_one_select(one: &ast::OneSelect, out: &mut Vec<String>) {
+fn collect_from_one_select(one: &ast::OneSelect, out: &mut Vec<crate::IdentKey>) {
     match one {
         ast::OneSelect::Select { from, .. } => {
             if let Some(from_clause) = from {
@@ -146,14 +140,14 @@ fn collect_from_one_select(one: &ast::OneSelect, out: &mut Vec<String>) {
 ///   not make the query recursive), weighted by how many references its body
 ///   contains.
 struct RecursiveRefCounter<'a> {
-    cte_name: &'a str,
+    cte_name: &'a crate::IdentKey,
 }
 
 /// Names visible at the current point, innermost last. Each entry carries the
 /// number of recursive references that using the name implies: 0 for a name
 /// that shadows the recursive table, and the body's own reference count for
 /// any other nested CTE.
-type RecursiveRefScope = Vec<(String, usize)>;
+type RecursiveRefScope = Vec<(crate::IdentKey, usize)>;
 
 impl RecursiveRefCounter<'_> {
     /// The number of recursive references implied by referring to `name`.
@@ -173,7 +167,7 @@ impl RecursiveRefCounter<'_> {
             return;
         };
         for cte in &with.ctes {
-            let name = normalize_ident(cte.tbl_name.as_str());
+            let name = cte.tbl_name.to_key();
             // The CTE's own name is visible inside its body, where it refers
             // to the nested CTE itself rather than the recursive table.
             scope.push((name, 0));
@@ -255,14 +249,14 @@ impl RecursiveRefCounter<'_> {
         match table {
             ast::SelectTable::Table(name, _, _) => {
                 if name.db_name.is_none() {
-                    self.name_weight(&normalize_ident(name.name.as_str()), scope)
+                    self.name_weight(name.name.as_str(), scope)
                 } else {
                     0
                 }
             }
             ast::SelectTable::TableCall(name, args, _) => {
                 let mut count = if name.db_name.is_none() {
-                    self.name_weight(&normalize_ident(name.name.as_str()), scope)
+                    self.name_weight(name.name.as_str(), scope)
                 } else {
                     0
                 };
@@ -337,7 +331,7 @@ impl RecursiveRefCounter<'_> {
                     if name.db_name.is_some() {
                         return 0;
                     }
-                    let name = normalize_ident(name.name.as_str());
+                    let name = name.name.as_str();
                     // A direct reference only counts when nothing shadows the
                     // recursive table's name.
                     usize::from(
@@ -375,16 +369,16 @@ impl RecursiveRefCounter<'_> {
     }
 }
 
-fn collect_from_select_table(table: &ast::SelectTable, out: &mut Vec<String>) {
+fn collect_from_select_table(table: &ast::SelectTable, out: &mut Vec<crate::IdentKey>) {
     match table {
         ast::SelectTable::Table(qualified_name, _, _) => {
             if qualified_name.db_name.is_none() {
-                out.push(normalize_ident(qualified_name.name.as_str()));
+                out.push(qualified_name.name.to_key());
             }
         }
         ast::SelectTable::TableCall(qualified_name, args, _) => {
             if qualified_name.db_name.is_none() {
-                out.push(normalize_ident(qualified_name.name.as_str()));
+                out.push(qualified_name.name.to_key());
             }
             for arg in args {
                 collect_subquery_table_refs_in_expr(arg, out);
@@ -406,7 +400,7 @@ fn collect_from_select_table(table: &ast::SelectTable, out: &mut Vec<String>) {
 }
 
 /// Collect table references from subqueries embedded in expressions.
-fn collect_subquery_table_refs_in_select_exprs(select: &Select, out: &mut Vec<String>) {
+fn collect_subquery_table_refs_in_select_exprs(select: &Select, out: &mut Vec<crate::IdentKey>) {
     collect_subquery_table_refs_in_one_select(&select.body.select, out);
     for compound in &select.body.compounds {
         collect_subquery_table_refs_in_one_select(&compound.select, out);
@@ -424,7 +418,7 @@ fn collect_subquery_table_refs_in_select_exprs(select: &Select, out: &mut Vec<St
     }
 }
 
-fn collect_subquery_table_refs_in_one_select(one: &ast::OneSelect, out: &mut Vec<String>) {
+fn collect_subquery_table_refs_in_one_select(one: &ast::OneSelect, out: &mut Vec<crate::IdentKey>) {
     match one {
         ast::OneSelect::Select {
             columns,
@@ -469,7 +463,7 @@ fn collect_subquery_table_refs_in_one_select(one: &ast::OneSelect, out: &mut Vec
     }
 }
 
-fn collect_subquery_table_refs_in_expr(expr: &Expr, out: &mut Vec<String>) {
+fn collect_subquery_table_refs_in_expr(expr: &Expr, out: &mut Vec<crate::IdentKey>) {
     let _ = walk_expr(expr, &mut |node: &Expr| -> Result<WalkControl> {
         match node {
             Expr::Exists(select) | Expr::Subquery(select) => {
@@ -523,7 +517,7 @@ pub fn resolve_window_and_aggregate_functions(
                 order_by,
                 within_group,
             } => {
-                let ordered_set_func = ordered_set_agg_func(&normalize_ident(name.as_str()));
+                let ordered_set_func = ordered_set_agg_func(name.as_key_str());
 
                 if !within_group.is_empty() {
                     let new_agg = build_ordered_set_aggregate(
@@ -812,7 +806,7 @@ fn link_with_window(
                     // Named windows store their FRAME clause on the
                     // `NamedWindowDef`. Look it up and validate the
                     // clause as this function's user_frame.
-                    let window_name = normalize_ident(name.as_str());
+                    let window_name = name.to_key();
                     let def = named_windows
                         .iter()
                         .rfind(|d| d.name == window_name)
@@ -969,7 +963,7 @@ fn chain_inline_window_base(
     windows: &[Window],
 ) -> Result<ast::Window> {
     let base = window.base.as_ref().expect("caller checked base.is_some()");
-    let base_name = normalize_ident(base.as_str());
+    let base_name = base.to_key();
     let Some(base_def) = named_windows.iter().rfind(|d| d.name == base_name) else {
         crate::bail_parse_error!("no such window: {}", base_name);
     };
@@ -1028,7 +1022,7 @@ fn resolve_window<'a>(
             Ok(windows.last_mut().expect("just pushed, so must exist"))
         }
         Over::Name(name) => {
-            let window_name = normalize_ident(name.as_str());
+            let window_name = name.to_key();
             // Reuse an existing resolved entry with the same name AND
             // frame so functions sharing one coerced frame fold into one
             // ephemeral-table pass. SQLite uses the most recent
@@ -1091,12 +1085,15 @@ fn add_aggregate_if_not_exists(
 
 /// Maps a normalized function name to the ordered-set [`AggFunc`] it implements, if any.
 /// Ordered-set aggregates are written `f(direct_args) WITHIN GROUP (ORDER BY x)`.
-fn ordered_set_agg_func(normalized_name: &str) -> Option<AggFunc> {
-    match normalized_name {
-        "mode" => Some(AggFunc::Mode),
-        "percentile_cont" => Some(AggFunc::PercentileCont),
-        "percentile_disc" => Some(AggFunc::PercentileDisc),
-        _ => None,
+fn ordered_set_agg_func(name: &crate::IdentKeyStr) -> Option<AggFunc> {
+    if name == "mode" {
+        Some(AggFunc::Mode)
+    } else if name == "percentile_cont" {
+        Some(AggFunc::PercentileCont)
+    } else if name == "percentile_disc" {
+        Some(AggFunc::PercentileDisc)
+    } else {
+        None
     }
 }
 
@@ -1283,7 +1280,7 @@ fn plan_cte(
     match cte_query_plan {
         Plan::Select(_) | Plan::CompoundSelect { .. } | Plan::RecursiveCte(_) => {
             JoinedTable::new_subquery_from_plan(
-                cte_definition.name.clone(),
+                cte_definition.name.to_string(),
                 cte_query_plan,
                 None,
                 program.table_reference_counter.next(),
@@ -1405,7 +1402,7 @@ fn prepare_recursive_cte_plan(
     }
 
     let input_table = JoinedTable::new_recursive_cte_input(
-        cte_definition.name.clone(),
+        cte_definition.name.to_string(),
         &initial_query,
         program.table_reference_counter.next(),
         explicit_columns,
@@ -1414,7 +1411,7 @@ fn prepare_recursive_cte_plan(
 
     let mut recursive_query_outer_refs = outer_query_refs.to_vec();
     recursive_query_outer_refs.push(OuterQueryReference {
-        identifier: cte_definition.name.clone(),
+        identifier: cte_definition.name.to_string(),
         internal_id: input_table.internal_id,
         table: input_table.table,
         using_dedup_hidden_cols: ColumnMask::default(),
@@ -1469,7 +1466,7 @@ fn prepare_recursive_cte_plan(
 
     Ok(Plan::RecursiveCte(Box::new(
         super::plan::RecursiveCtePlan {
-            name: cte_definition.name.clone(),
+            name: cte_definition.name.to_string(),
             initial_query: Box::new(initial_query),
             recursive_query: Box::new(recursive_query),
             input_table_id,
@@ -1547,7 +1544,7 @@ pub fn plan_ctes_as_outer_refs(
             false,
         )?;
         table_references.add_outer_query_reference(OuterQueryReference {
-            identifier: cte_definition.name.clone(),
+            identifier: cte_definition.name.to_string(),
             internal_id: joined_table.internal_id,
             table: joined_table.table,
             using_dedup_hidden_cols: ColumnMask::default(),
@@ -1612,7 +1609,7 @@ fn parse_from_clause_table(
                     false,
                 )?;
                 outer_query_refs_for_subquery.push(OuterQueryReference {
-                    identifier: cte_definition.name.clone(),
+                    identifier: cte_definition.name.to_string(),
                     internal_id: cte_table.internal_id,
                     table: cte_table.table,
                     using_dedup_hidden_cols: ColumnMask::default(),
@@ -1645,7 +1642,7 @@ fn parse_from_clause_table(
             }
             let cur_table_index = table_references.joined_tables().len();
             let identifier = maybe_alias
-                .map(|a| normalize_ident(a.name().as_str()))
+                .map(|a| String::from(a.name().to_key()))
                 .unwrap_or_else(|| format!("(subquery-{cur_table_index})"));
             table_references.add_joined_table(JoinedTable::new_subquery_from_plan(
                 identifier,
@@ -1689,7 +1686,7 @@ fn parse_table(
     indexed: Option<ast::Indexed>,
     connection: &Arc<crate::Connection>,
 ) -> Result<()> {
-    let normalized_qualified_name = normalize_ident(qualified_name.name.as_str());
+    let normalized_qualified_name = qualified_name.name.to_key();
     let database_id = resolver.resolve_existing_table_database_id_qualified(qualified_name)?;
     let table_name = &qualified_name.name;
 
@@ -1719,7 +1716,7 @@ fn parse_table(
 
             // If there's an alias provided, update the identifier to use that alias
             if let Some(a) = maybe_alias {
-                cte_table.identifier = normalize_ident(a.name().as_str());
+                cte_table.identifier = String::from(a.name().to_key());
             }
 
             // Mark the pre-planned outer_query_ref as "CTE definition only" so it is
@@ -1754,7 +1751,7 @@ fn parse_table(
                 }
                 crate::bail_parse_error!("'{}' is not a function", table_name.as_str());
             }
-            let alias = maybe_alias.map(|a| normalize_ident(a.name().as_str()));
+            let alias = maybe_alias.map(|a| String::from(a.name().to_key()));
             let cte_select_syntax = outer_ref.cte_select.clone();
             let cte_explicit_columns = outer_ref.cte_explicit_columns.clone();
             let cte_id = outer_ref.cte_id;
@@ -1793,7 +1790,7 @@ fn parse_table(
                     }
                 }
                 let mut joined_table = JoinedTable::new_subquery_from_plan(
-                    normalized_qualified_name.clone(),
+                    normalized_qualified_name.to_string(),
                     cte_query_plan,
                     None,
                     program.table_reference_counter.next(),
@@ -1816,7 +1813,7 @@ fn parse_table(
                 table_references.add_joined_table(JoinedTable {
                     op: Operation::default_scan_for(&outer_table),
                     table: outer_table,
-                    identifier: alias.unwrap_or(normalized_qualified_name),
+                    identifier: alias.unwrap_or_else(|| normalized_qualified_name.to_string()),
                     internal_id,
                     join_info: None,
                     col_used_mask: ColumnUsedMask::default(),
@@ -1834,7 +1831,7 @@ fn parse_table(
     let table = resolver.with_schema(database_id, |schema| schema.get_table(table_name.as_str()));
 
     if let Some(table) = table {
-        let alias = maybe_alias.map(|a| normalize_ident(a.name().as_str()));
+        let alias = maybe_alias.map(|a| String::from(a.name().to_key()));
         let internal_id = program.table_reference_counter.next();
         let tbl_ref = if let Table::Virtual(tbl) = table.as_ref() {
             transform_args_into_where_terms(args, internal_id, vtab_predicates, table.as_ref())?;
@@ -1852,7 +1849,7 @@ fn parse_table(
         table_references.add_joined_table(JoinedTable {
             op: Operation::default_scan_for(&tbl_ref),
             table: tbl_ref,
-            identifier: alias.unwrap_or(normalized_qualified_name),
+            identifier: alias.unwrap_or_else(|| normalized_qualified_name.to_string()),
             internal_id,
             join_info: None,
             col_used_mask: ColumnUsedMask::default(),
@@ -1878,7 +1875,7 @@ fn parse_table(
                 if let (Some(name_str), ast::ResultColumn::Expr(_, ref mut alias)) =
                     (&col.name, result_col)
                 {
-                    *alias = Some(ast::As::As(ast::Name::exact(name_str.clone())));
+                    *alias = Some(ast::As::As(ast::Name::exact_ref(name_str)));
                 }
             }
         }
@@ -1954,7 +1951,7 @@ fn parse_table(
         ));
         drop(view_guard);
 
-        let alias = maybe_alias.map(|a| normalize_ident(a.name().as_str()));
+        let alias = maybe_alias.map(|a| String::from(a.name().to_key()));
 
         table_references.add_joined_table(JoinedTable {
             op: Operation::Scan(Scan::BTreeTable {
@@ -1962,7 +1959,7 @@ fn parse_table(
                 index: None,
             }),
             table: Table::BTree(btree_table),
-            identifier: alias.unwrap_or(normalized_qualified_name),
+            identifier: alias.unwrap_or_else(|| normalized_qualified_name.to_string()),
             internal_id: program.table_reference_counter.next(),
             join_info: None,
             col_used_mask: ColumnUsedMask::default(),
@@ -2004,7 +2001,7 @@ fn parse_table(
     let is_incompatible = resolver.with_schema(database_id, |schema| {
         schema
             .incompatible_views
-            .contains(&normalized_qualified_name)
+            .contains(crate::IdentKeyStr::new(&normalized_qualified_name))
     });
 
     if is_incompatible {
@@ -2020,7 +2017,9 @@ fn parse_table(
 
     // A view row whose stored SQL failed to parse at schema load
     let is_broken_view = resolver.with_schema(database_id, |schema| {
-        schema.broken_views.contains(&normalized_qualified_name)
+        schema
+            .broken_views
+            .contains(crate::IdentKeyStr::new(&normalized_qualified_name))
     });
 
     if is_broken_view {
@@ -2145,7 +2144,7 @@ pub fn parse_from(
                     false,
                 )?;
                 table_references.add_outer_query_reference(OuterQueryReference {
-                    identifier: cte_definition.name.clone(),
+                    identifier: cte_definition.name.to_string(),
                     internal_id: cte_table.internal_id,
                     table: cte_table.table,
                     using_dedup_hidden_cols: ColumnMask::default(),
@@ -2647,7 +2646,7 @@ fn parse_join(
             ast::JoinConstraint::Using(distinct_names) => {
                 // USING join is replaced with a list of equality predicates
                 for distinct_name in distinct_names.iter() {
-                    let name_normalized = normalize_ident(distinct_name.as_str());
+                    let name_normalized = distinct_name.as_str();
                     let cur_table_idx = table_references.joined_tables().len() - 1;
                     let left_tables = &table_references.joined_tables()[..cur_table_idx];
                     turso_assert!(!left_tables.is_empty());
@@ -2662,7 +2661,7 @@ fn parse_join(
                             .find(|(_, col)| {
                                 col.name
                                     .as_deref()
-                                    .is_some_and(|name| name.eq_ignore_ascii_case(&name_normalized))
+                                    .is_some_and(|name| name.eq_ignore_ascii_case(name_normalized))
                             })
                             .map(|(idx, col)| {
                                 (left_table_offset, left_table.internal_id, idx, col)
@@ -2680,7 +2679,7 @@ fn parse_join(
                     let right_col = right_table.columns().iter().enumerate().find(|(_, col)| {
                         col.name
                             .as_deref()
-                            .is_some_and(|name| name.eq_ignore_ascii_case(&name_normalized))
+                            .is_some_and(|name| name.eq_ignore_ascii_case(name_normalized))
                     });
                     if right_col.is_none() {
                         crate::bail_parse_error!(

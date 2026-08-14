@@ -196,7 +196,8 @@ pub struct ReparseSchemaInner {
     /// VACUUM-supplied sequence descriptors to graft onto the rebuilt schema
     /// instead of re-reading each backing table. `None` for a normal reparse,
     /// which recovers descriptors from disk in the `PopulateSequences` phase.
-    preserved_sequences: Option<rustc_hash::FxHashMap<String, Arc<crate::schema::Sequence>>>,
+    preserved_sequences:
+        Option<rustc_hash::FxHashMap<crate::IdentKey, Arc<crate::schema::Sequence>>>,
     phase: ReparsePhase,
 }
 
@@ -502,7 +503,7 @@ pub struct Connection {
     /// and this is not currently centralized; each setter bumps the generation individually.
     pub(crate) prepare_context_generation: AtomicU64,
     /// Per-connection last-returned value for each sequence (for currval()).
-    pub(crate) sequence_currvals: RwLock<HashMap<String, i64>>,
+    pub(crate) sequence_currvals: RwLock<HashMap<crate::IdentKey, i64>>,
 }
 
 // SAFETY: This needs to be audited for thread safety.
@@ -1315,7 +1316,7 @@ impl Connection {
     pub(crate) fn reparse_schema_with_cookie_keeping_sequences(
         self: &Arc<Connection>,
         cookie: u32,
-        sequences: rustc_hash::FxHashMap<String, Arc<crate::schema::Sequence>>,
+        sequences: rustc_hash::FxHashMap<crate::IdentKey, Arc<crate::schema::Sequence>>,
     ) -> Result<()> {
         let io = self.pager.load().io.clone();
         let mut state = ReparseSchemaState::default();
@@ -1358,7 +1359,9 @@ impl Connection {
     fn init_reparse_building(
         self: &Arc<Connection>,
         cookie: u32,
-        preserved_sequences: Option<rustc_hash::FxHashMap<String, Arc<crate::schema::Sequence>>>,
+        preserved_sequences: Option<
+            rustc_hash::FxHashMap<crate::IdentKey, Arc<crate::schema::Sequence>>,
+        >,
     ) -> Result<ReparseSchemaInner> {
         let guard = self.schema_reparse_guard();
         self.pager.load().set_schema_cookie(Some(cookie));
@@ -1435,7 +1438,7 @@ impl Connection {
                     let attached_resolver = |name: &str| -> Option<usize> {
                         self.attached_databases
                             .read()
-                            .get_database_by_name(&crate::util::normalize_ident(name))
+                            .get_database_by_name(name)
                             .map(|(idx, _)| idx)
                     };
                     crate::return_if_io!(crate::util::parse_schema_rows(
@@ -1448,10 +1451,13 @@ impl Connection {
 
                     // Rehydrate built-in table-valued functions captured at init.
                     for vtab in &inner.tvfs {
-                        let normalized = crate::util::normalize_ident(&vtab.name);
-                        inner.fresh.tables.entry(normalized).or_insert_with(|| {
-                            Arc::new(crate::schema::Table::Virtual(vtab.clone()))
-                        });
+                        inner
+                            .fresh
+                            .tables
+                            .entry(crate::IdentKey::from_unquoted(&vtab.name))
+                            .or_insert_with(|| {
+                                Arc::new(crate::schema::Table::Virtual(vtab.clone()))
+                            });
                     }
 
                     // Next: recover sequence descriptors (or graft the VACUUM map).
@@ -1508,8 +1514,11 @@ impl Connection {
                             work[*idx].clone()
                         };
                         let (backing_table_name, seq_name) = entry;
-                        let normalized = crate::util::normalize_ident(&seq_name);
-                        if inner.fresh.sequences.contains_key(&normalized) {
+                        if inner
+                            .fresh
+                            .sequences
+                            .contains_key(crate::IdentKeyStr::new(&seq_name))
+                        {
                             *idx += 1;
                             *stmt = None;
                             *meta = None;
@@ -1518,6 +1527,7 @@ impl Connection {
                             *watermark_row = None;
                             continue;
                         }
+                        let key = crate::IdentKey::from_unquoted(&seq_name);
                         if seq.is_none() {
                             crate::return_if_io!(self.read_seq_descriptor_row_nonblock(
                                 &backing_table_name,
@@ -1546,10 +1556,10 @@ impl Connection {
                             *watermark_row,
                         )?;
                         if let Some(mv_store) = self.db.get_mv_store().as_ref() {
-                            mv_store.set_sequence_watermark(&normalized, watermark);
+                            mv_store.set_sequence_watermark(key.as_str(), watermark);
                         }
                         let sequence = seq.take().expect("sequence set above");
-                        inner.fresh.sequences.insert(normalized, Arc::new(sequence));
+                        inner.fresh.sequences.insert(key, Arc::new(sequence));
                         *idx += 1;
                         *stmt = None;
                         *meta = None;
@@ -1559,10 +1569,9 @@ impl Connection {
 
                     // Decide whether to load custom types next.
                     if self.experimental_custom_types_enabled()
-                        && inner
-                            .fresh
-                            .tables
-                            .contains_key(crate::schema::TURSO_TYPES_TABLE_NAME)
+                        && inner.fresh.tables.contains_key(crate::IdentKeyStr::new(
+                            crate::schema::TURSO_TYPES_TABLE_NAME,
+                        ))
                     {
                         // Temporarily install the schema so we can query against it.
                         self.with_schema_mut(|schema| {
@@ -1924,7 +1933,9 @@ impl Connection {
     pub(crate) fn query_stored_type_definitions(self: &Arc<Connection>) -> Result<Vec<String>> {
         let has_types_table = {
             let s = self.schema.read();
-            s.tables.contains_key(crate::schema::TURSO_TYPES_TABLE_NAME)
+            s.tables.contains_key(crate::IdentKeyStr::new(
+                crate::schema::TURSO_TYPES_TABLE_NAME,
+            ))
         };
         if !has_types_table {
             return Ok(Vec::new());
@@ -2811,7 +2822,7 @@ impl Connection {
             let attached_resolver = |name: &str| -> Option<usize> {
                 self.attached_databases
                     .read()
-                    .get_database_by_name(&crate::util::normalize_ident(name))
+                    .get_database_by_name(name)
                     .map(|(idx, _)| idx)
             };
             for (ty, name, table_name, root_page, sql) in &rows_data {
@@ -2917,7 +2928,7 @@ impl Connection {
             .read()
             .name_to_index
             .keys()
-            .cloned()
+            .map(ToString::to_string)
             .collect()
     }
 
@@ -3160,14 +3171,13 @@ impl Connection {
 
     /// Get the database id for a schema name ("main", "temp", or an attached db alias).
     pub(crate) fn get_database_id_by_name(&self, name: &str) -> Result<usize> {
-        let normalized: String = crate::util::normalize_ident(name);
-        match normalized.as_str() {
-            "main" => Ok(MAIN_DB_ID),
-            "temp" => Ok(TEMP_DB_ID),
+        match name {
+            name if name.eq_ignore_ascii_case("main") => Ok(MAIN_DB_ID),
+            name if name.eq_ignore_ascii_case("temp") => Ok(TEMP_DB_ID),
             _ => self
                 .attached_databases
                 .read()
-                .get_database_by_name(&normalized)
+                .get_database_by_name(name)
                 .map(|(idx, _)| idx)
                 .ok_or_else(|| LimboError::InvalidArgument(format!("no such database: {name}"))),
         }
@@ -3196,7 +3206,7 @@ impl Connection {
         self.attached_databases
             .read()
             .name_to_index
-            .contains_key(alias)
+            .contains_key(crate::IdentKeyStr::new(alias))
     }
 
     /// Returns the reserved-space value inherited from the main connection's pager.
@@ -3591,7 +3601,11 @@ impl Connection {
         // must not hold the write lock during the rollback.
         let database_id = {
             let attached_dbs = self.attached_databases.read();
-            match attached_dbs.name_to_index.get(alias).copied() {
+            match attached_dbs
+                .name_to_index
+                .get(crate::IdentKeyStr::new(alias))
+                .copied()
+            {
                 Some(id) => id,
                 None => {
                     return Err(LimboError::InvalidArgument(format!(
@@ -3647,7 +3661,7 @@ impl Connection {
             .read()
             .name_to_index
             .keys()
-            .cloned()
+            .map(ToString::to_string)
             .collect()
     }
 
@@ -3803,7 +3817,7 @@ impl Connection {
             } else {
                 String::new()
             };
-            databases.push((seq_number, alias.clone(), file_path));
+            databases.push((seq_number, alias.to_string(), file_path));
         }
 
         // Sort by sequence number to ensure consistent ordering
@@ -3904,27 +3918,30 @@ impl Connection {
     pub fn find_sequence(&self, name: &str) -> Result<Arc<crate::schema::Sequence>> {
         let (db_id, seq_name) = if let Some((schema, seq)) = name.split_once('.') {
             let db_id = self.get_database_id_by_name(schema)?;
-            (db_id, crate::util::normalize_ident(seq))
+            (db_id, seq)
         } else {
-            (MAIN_DB_ID, crate::util::normalize_ident(name))
+            (MAIN_DB_ID, name)
         };
 
         self.with_schema(db_id, |schema| {
-            schema.get_sequence(&seq_name).map(Arc::clone)
+            schema.get_sequence(seq_name).map(Arc::clone)
         })
         .ok_or_else(|| LimboError::ParseError(format!("sequence \"{name}\" does not exist")))
     }
 
     /// Record that this connection has seen a value from the named sequence (for currval).
     pub fn set_sequence_currval(&self, name: &str, value: i64) {
-        let normalized = crate::util::normalize_ident(name);
-        self.sequence_currvals.write().insert(normalized, value);
+        self.sequence_currvals
+            .write()
+            .insert(crate::IdentKey::from_unquoted(name), value);
     }
 
     /// Get the last value returned by nextval/setval for the named sequence on this connection.
     pub fn get_sequence_currval(&self, name: &str) -> Option<i64> {
-        let normalized = crate::util::normalize_ident(name);
-        self.sequence_currvals.read().get(&normalized).copied()
+        self.sequence_currvals
+            .read()
+            .get(crate::IdentKeyStr::new(name))
+            .copied()
     }
 
     /// Drop this connection's currval entry for a sequence. Called on DROP
@@ -3934,8 +3951,9 @@ impl Connection {
     /// on the fresh sequence must error with "not yet defined in this
     /// session" until a nextval/setval establishes it.
     pub fn clear_sequence_currval(&self, name: &str) {
-        let normalized = crate::util::normalize_ident(name);
-        self.sequence_currvals.write().remove(&normalized);
+        self.sequence_currvals
+            .write()
+            .remove(crate::IdentKeyStr::new(name));
     }
 
     /// Total times this connection's autonomous sequence inner-tx ran into
@@ -4009,9 +4027,8 @@ impl Connection {
                         pending[*idx].clone()
                     };
                     let (backing_table_name, seq_name) = entry;
-                    let normalized = crate::util::normalize_ident(&seq_name);
                     let already_present =
-                        self.with_schema(MAIN_DB_ID, |s| s.get_sequence(&normalized).is_some());
+                        self.with_schema(MAIN_DB_ID, |s| s.get_sequence(&seq_name).is_some());
                     if already_present {
                         *idx += 1;
                         *stmt = None;
@@ -4021,6 +4038,7 @@ impl Connection {
                         *watermark_row = None;
                         continue;
                     }
+                    let key = crate::IdentKey::from_unquoted(&seq_name);
                     if seq.is_none() {
                         crate::return_if_io!(self.read_seq_descriptor_row_nonblock(
                             &backing_table_name,
@@ -4049,13 +4067,11 @@ impl Connection {
                         *watermark_row,
                     )?;
                     if let Some(mv_store) = self.db.get_mv_store().as_ref() {
-                        mv_store.set_sequence_watermark(&normalized, watermark);
+                        mv_store.set_sequence_watermark(key.as_str(), watermark);
                     }
                     let sequence = seq.take().expect("sequence set above");
                     self.with_database_schema_mut(MAIN_DB_ID, |schema| {
-                        schema
-                            .sequences
-                            .insert(normalized.clone(), Arc::new(sequence));
+                        schema.sequences.insert(key, Arc::new(sequence));
                     })?;
                     *idx += 1;
                     *stmt = None;
@@ -4414,7 +4430,12 @@ impl Connection {
 
     /// Creates a HashSet of modules that have been loaded
     pub fn get_syms_vtab_mods(&self) -> HashSet<String> {
-        self.syms.read().vtab_modules.keys().cloned().collect()
+        self.syms
+            .read()
+            .vtab_modules
+            .keys()
+            .map(ToString::to_string)
+            .collect()
     }
 
     /// Returns external (extension) functions: (name, is_aggregate, argc, deterministic)
@@ -4446,12 +4467,11 @@ impl Connection {
         callback: crate::ContextCollationFunction,
         context_destructor: Option<crate::ContextDestructor>,
     ) {
-        let collation = CollationSeq::custom(&name);
-        let normalized_name = crate::util::normalize_ident(&name);
+        let collation = CollationSeq::custom_owned(name);
         self.syms.write().collations.insert(
             collation.id(),
             Arc::new(function::ExternalCollation::new(
-                normalized_name,
+                collation,
                 context,
                 callback,
                 context_destructor,
@@ -5047,11 +5067,11 @@ pub type StepResult = vdbe::StepResult;
 
 #[derive(Default)]
 pub struct SymbolTable {
-    pub functions: HashMap<String, Arc<function::ExternalFunc>>,
+    pub functions: HashMap<crate::IdentKey, Arc<function::ExternalFunc>>,
     pub collations: HashMap<u32, Arc<function::ExternalCollation>>,
-    pub vtabs: HashMap<String, Arc<VirtualTable>>,
-    pub vtab_modules: HashMap<String, Arc<crate::ext::VTabImpl>>,
-    pub index_methods: HashMap<String, Arc<dyn IndexMethod>>,
+    pub vtabs: HashMap<crate::IdentKey, Arc<VirtualTable>>,
+    pub vtab_modules: HashMap<crate::IdentKey, Arc<crate::ext::VTabImpl>>,
+    pub index_methods: HashMap<crate::IdentKey, Arc<dyn IndexMethod>>,
 }
 
 impl std::fmt::Debug for SymbolTable {
@@ -5101,13 +5121,8 @@ impl SymbolTable {
         arg_count: usize,
     ) -> Option<Arc<function::ExternalFunc>> {
         self.functions
-            .get(name)
+            .get(crate::IdentKeyStr::new(name))
             .cloned()
-            .or_else(|| {
-                self.functions
-                    .get(&crate::util::normalize_ident(name))
-                    .cloned()
-            })
             .filter(|func| func.func.matches_arg_count(arg_count))
     }
 
@@ -5204,7 +5219,10 @@ mod tests {
     // given a attached 'alias', return the Database and Pager for that attached database
     fn attached_entry(conn: &Connection, alias: &str) -> (Arc<Database>, Arc<Pager>) {
         let catalog = conn.attached_databases.read();
-        let index = *catalog.name_to_index.get(alias).unwrap();
+        let index = *catalog
+            .name_to_index
+            .get(crate::IdentKeyStr::new(alias))
+            .unwrap();
         catalog.index_to_data.get(&index).unwrap().clone()
     }
 

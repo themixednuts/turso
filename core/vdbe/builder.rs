@@ -219,7 +219,7 @@ pub struct ProgramBuilder {
     /// Stack of CTE names currently being planned. Used to detect circular
     /// references in non-recursive CTEs and to prevent fallthrough to schema
     /// resolution for same-named tables/views.
-    ctes_being_defined: Vec<String>,
+    ctes_being_defined: Vec<crate::IdentKey>,
     /// If this ProgramBuilder is building trigger subprogram, a ref to the trigger is stored here.
     pub trigger: Option<Arc<Trigger>>,
     pub table_reference_counter: TableRefIdCounter,
@@ -244,7 +244,7 @@ pub struct ProgramBuilder {
     /// Maps identifier names to registers for custom type encode/decode expressions.
     /// When set, `Expr::Id("value")` resolves to the register holding the input value,
     /// and type parameter names resolve to registers holding their concrete values.
-    pub id_register_overrides: HashMap<String, usize>,
+    pub id_register_overrides: HashMap<crate::IdentKey, usize>,
     /// Hash join build signatures keyed by hash table id.
     hash_build_signatures: HashMap<usize, HashBuildSignature>,
     /// Hash tables to keep open across subplans (e.g. materialization).
@@ -743,7 +743,7 @@ impl ProgramBuilder {
     /// Mark a CTE name as currently being planned. While on the stack,
     /// `parse_table` will reject references to this name with "circular
     /// reference" instead of falling through to schema resolution.
-    pub fn push_cte_being_defined(&mut self, name: String) {
+    pub fn push_cte_being_defined(&mut self, name: crate::IdentKey) {
         self.ctes_being_defined.push(name);
     }
 
@@ -761,7 +761,10 @@ impl ProgramBuilder {
     /// the inner definitions shadow the outer names for that lexical scope,
     /// so references to them are not circular. Returns the hidden names for
     /// [Self::unmask_shadowed_ctes_being_defined].
-    pub fn mask_shadowed_ctes_being_defined(&mut self, shadowing_names: &[String]) -> Vec<String> {
+    pub fn mask_shadowed_ctes_being_defined(
+        &mut self,
+        shadowing_names: &[crate::IdentKey],
+    ) -> Vec<crate::IdentKey> {
         let mut masked = Vec::new();
         self.ctes_being_defined.retain(|name| {
             if shadowing_names.contains(name) {
@@ -777,18 +780,18 @@ impl ProgramBuilder {
     /// Restore names hidden by [Self::mask_shadowed_ctes_being_defined] when
     /// their shadowing scope ends. Membership is all that matters for the
     /// circular-reference check, so restore order is irrelevant.
-    pub fn unmask_shadowed_ctes_being_defined(&mut self, masked: Vec<String>) {
+    pub fn unmask_shadowed_ctes_being_defined(&mut self, masked: Vec<crate::IdentKey>) {
         self.ctes_being_defined.extend(masked);
     }
 
     /// Temporarily take the CTE-being-defined stack (e.g. during view
     /// expansion, which should not see CTE context from the caller).
-    pub fn take_ctes_being_defined(&mut self) -> Vec<String> {
+    pub fn take_ctes_being_defined(&mut self) -> Vec<crate::IdentKey> {
         std::mem::take(&mut self.ctes_being_defined)
     }
 
     /// Restore the CTE-being-defined stack after a context-isolated expansion.
-    pub fn restore_ctes_being_defined(&mut self, saved: Vec<String>) {
+    pub fn restore_ctes_being_defined(&mut self, saved: Vec<crate::IdentKey>) {
         self.ctes_being_defined = saved;
     }
 

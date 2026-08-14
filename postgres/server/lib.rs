@@ -109,35 +109,17 @@ struct TursoPgHandler {
 
 impl TursoPgHandler {
     /// After a DROP SCHEMA query succeeds, delete the schema's database file.
-    /// Uses simple string matching to detect DROP SCHEMA statements.
     fn cleanup_dropped_schema_file(&self, query: &str) {
         if self.db_file == ":memory:" {
             return;
         }
-        // Simple detection: look for DROP SCHEMA pattern
-        let trimmed = query.trim().to_lowercase();
-        if !trimmed.starts_with("drop schema") {
+        let Some(filename) = turso_pg::dropped_postgres_schema_file_name(query) else {
             return;
-        }
-        // Extract schema name: "drop schema [if exists] <name> [cascade|restrict]"
-        let rest = trimmed.strip_prefix("drop schema").unwrap().trim();
-        let rest = rest
-            .strip_prefix("if exists")
-            .map(|s| s.trim())
-            .unwrap_or(rest);
-        // Take the first word as the schema name
-        let name = rest
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .trim_matches('"');
-        if name.is_empty() || name == "public" {
-            return;
-        }
+        };
         let parent = std::path::Path::new(&self.db_file)
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
-        let schema_file = parent.join(format!("turso-postgres-schema-{name}.db"));
+        let schema_file = parent.join(filename);
         if schema_file.exists() {
             if let Err(e) = std::fs::remove_file(&schema_file) {
                 tracing::warn!("Failed to delete schema file {:?}: {}", schema_file, e);

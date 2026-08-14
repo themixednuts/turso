@@ -21,7 +21,7 @@ use crate::schema::{
 use crate::storage::pager::CreateBTreeFlags;
 use crate::translate::emitter::Resolver;
 use crate::translate::schema::{emit_schema_entry, SchemaEntryType, SQLITE_TABLEID};
-use crate::util::{escape_sql_string_literal, normalize_ident};
+use crate::util::escape_sql_string_literal;
 use crate::vdbe::builder::{CursorType, ProgramBuilder};
 use crate::vdbe::insn::{
     to_u32, AddSequenceData, CmpInsFlags, Cookie, InsertFlags, Insn, RegisterOrLiteral,
@@ -816,7 +816,7 @@ pub fn translate_create_sequence(
     let schema_cookie = resolver.with_schema(database_id, |s| s.schema_version);
     program.begin_write_on_database(database_id, schema_cookie)?;
 
-    let normalized_name = normalize_ident(seq_name.name.as_str());
+    let normalized_name = seq_name.name.to_key();
 
     // `__turso_internal_autoincrement_<table>` is reserved for the
     // implicit sequences CREATE TABLE ... AUTOINCREMENT installs.
@@ -845,6 +845,8 @@ pub fn translate_create_sequence(
         }
         bail_parse_error!("sequence \"{}\" already exists", normalized_name);
     }
+
+    let normalized_name = String::from(normalized_name);
 
     // Validate parameters early (gives immediate error instead of deferred)
     let seq = Sequence::new(
@@ -1015,8 +1017,9 @@ pub fn translate_drop_sequence(
     let schema_cookie = resolver.with_schema(database_id, |s| s.schema_version);
     program.begin_write_on_database(database_id, schema_cookie)?;
 
-    let normalized_name = normalize_ident(seq_name.name.as_str());
-    let dropped = emit_drop_sequence_cleanup(program, resolver, database_id, &normalized_name)?;
+    let normalized_name = seq_name.name.to_key();
+    let dropped =
+        emit_drop_sequence_cleanup(program, resolver, database_id, normalized_name.as_str())?;
     if !dropped {
         if if_exists {
             return Ok(());

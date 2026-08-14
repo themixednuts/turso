@@ -2195,7 +2195,7 @@ pub fn translate_expr(
         }
         ast::Expr::Id(id) => {
             // Check for custom type expression overrides (e.g. `value` placeholder)
-            if let Some(&reg) = program.id_register_overrides.get(id.as_str()) {
+            if let Some(&reg) = program.id_register_overrides.get(id.as_key_str()) {
                 program.emit_insn(Insn::Copy {
                     src_reg: reg,
                     dst_reg: target_register,
@@ -2895,16 +2895,14 @@ pub fn translate_expr(
             // Slow path: recursively resolve the base expression's output type,
             // then look up the field/variant in that type.
             let td = resolve_expr_output_type(base, referenced_tables, resolver)?;
-            let field_name = normalize_ident(field.as_str());
-
-            if let Some((idx, _)) = td.find_struct_field(&field_name) {
+            if let Some((idx, _)) = td.find_struct_field(field.as_str()) {
                 program.emit_insn(Insn::StructField {
                     src_reg: base_reg,
                     field_index: idx,
                     dest: target_register,
                 });
                 return Ok(target_register);
-            } else if let Some(tag_index) = td.resolve_union_tag_index(&field_name) {
+            } else if let Some(tag_index) = td.resolve_union_tag_index(field.as_str()) {
                 program.emit_insn(Insn::UnionExtract {
                     src_reg: base_reg,
                     expected_tag: tag_index,
@@ -2912,17 +2910,9 @@ pub fn translate_expr(
                 });
                 return Ok(target_register);
             } else if td.is_struct() {
-                crate::bail_parse_error!(
-                    "no such field '{}' in struct type '{}'",
-                    field_name,
-                    td.name
-                );
+                crate::bail_parse_error!("no such field '{}' in struct type '{}'", field, td.name);
             } else if td.is_union() {
-                crate::bail_parse_error!(
-                    "no such variant '{}' in union type '{}'",
-                    field_name,
-                    td.name
-                );
+                crate::bail_parse_error!("no such variant '{}' in union type '{}'", field, td.name);
             } else {
                 crate::bail_parse_error!("type '{}' is not a struct or union type", td.name);
             }

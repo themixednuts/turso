@@ -19,6 +19,7 @@ use crate::{
     vdbe::Register,
     Connection, LimboError, Result, Value,
 };
+use crate::{IdentKey, IdentKeyStr};
 use parking_lot::{Mutex, RwLock};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::io::{BufWriter, Write};
@@ -1408,7 +1409,10 @@ fn key_info() -> KeyInfo {
 
 /// Parse field weights from a string like "body=2.0,title=1.0"
 /// Returns a HashMap mapping column names to tantivy 'boost factors'
-fn parse_field_weights(weights_str: &str, columns: &[IndexColumn]) -> Result<HashMap<String, f32>> {
+fn parse_field_weights(
+    weights_str: &str,
+    columns: &[IndexColumn],
+) -> Result<HashMap<IdentKey, f32>> {
     let mut weights = HashMap::default();
 
     if weights_str.is_empty() {
@@ -1416,7 +1420,10 @@ fn parse_field_weights(weights_str: &str, columns: &[IndexColumn]) -> Result<Has
     }
 
     // Get valid column names for validation
-    let valid_columns: HashSet<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+    let valid_columns: HashSet<IdentKey> = columns
+        .iter()
+        .map(|column| IdentKey::from_unquoted(&column.name))
+        .collect();
 
     // Parse format: "col1=1.5,col2=2.0"
     for part in weights_str.split(',') {
@@ -1435,7 +1442,8 @@ fn parse_field_weights(weights_str: &str, columns: &[IndexColumn]) -> Result<Has
         let weight_str = weight_str.trim();
 
         // Validate column exists in index
-        if !valid_columns.contains(col_name) {
+        let col_key = IdentKey::new(col_name);
+        if !valid_columns.contains(&col_key) {
             return Err(LimboError::ParseError(format!(
                 "unknown column '{}' in weights. Valid columns: {}",
                 col_name,
@@ -1458,7 +1466,7 @@ fn parse_field_weights(weights_str: &str, columns: &[IndexColumn]) -> Result<Has
             )));
         }
 
-        weights.insert(col_name.to_string(), weight);
+        weights.insert(col_key, weight);
     }
 
     Ok(weights)
@@ -1608,7 +1616,7 @@ pub struct FtsIndexAttachment {
     /// Weights for each field in FTS scoring.
     /// Created from WITH clause parameters,
     /// e.g. `WITH (tokenizer='default',weights='col1=1.0,col2=2.0')`.
-    field_weights: HashMap<String, f32>,
+    field_weights: HashMap<IdentKey, f32>,
     /// (min_gram, max_gram) for the ngram tokenizer, from the WITH clause
     /// `min_gram`/`max_gram` keys. [DEFAULT_NGRAM_WINDOW] unless configured.
     ngram_window: (usize, usize),
@@ -1651,27 +1659,24 @@ impl FtsIndexAttachment {
         // Validate WITH clause keys the same way bad values are validated:
         // a typo like `tokenzier` must be an error, not a silently different
         // index. Keys are matched case-insensitively.
-        let mut parameters: HashMap<String, &Value> = HashMap::default();
-        for (key, value) in &cfg.parameters {
-            let normalized = key.to_ascii_lowercase();
-            if !SUPPORTED_WITH_KEYS.contains(&normalized.as_str()) {
+        for key in cfg.parameters.keys() {
+            if !SUPPORTED_WITH_KEYS
+                .iter()
+                .any(|supported| key == *supported)
+            {
                 return Err(LimboError::ParseError(format!(
                     "unsupported FTS WITH parameter '{}'. Supported parameters: {}",
                     key,
                     SUPPORTED_WITH_KEYS.join(", ")
                 )));
             }
-            if parameters.insert(normalized, value).is_some() {
-                return Err(LimboError::ParseError(format!(
-                    "duplicate FTS WITH parameter '{key}'"
-                )));
-            }
         }
+        let parameters = &cfg.parameters;
 
         // Parse tokenizer from WITH clause parameters, default to "default"
         // The parser may include surrounding quotes in the value, so we strip them
         let tokenizer_name = parameters
-            .get("tokenizer")
+            .get(IdentKeyStr::new("tokenizer"))
             .and_then(|v| match v {
                 Value::Text(t) => {
                     let s = t.to_string();
@@ -1694,7 +1699,7 @@ impl FtsIndexAttachment {
 
         // Parse the ngram window: WITH (tokenizer = 'ngram', min_gram = 1, max_gram = 3)
         let parse_gram = |key: &str| -> Result<Option<usize>> {
-            let Some(value) = parameters.get(key) else {
+            let Some(value) = parameters.get(IdentKeyStr::new(key)) else {
                 return Ok(None);
             };
             match value {
@@ -1725,7 +1730,8 @@ impl FtsIndexAttachment {
         }
 
         // Parse field weights from WITH clause: weights='body=2.0,title=1.0'
-        let field_weights = if let Some(weights_value) = parameters.get("weights") {
+        let field_weights = if let Some(weights_value) = parameters.get(IdentKeyStr::new("weights"))
+        {
             let weights_str = match weights_value {
                 Value::Text(t) => {
                     let s = t.to_string();
@@ -2142,7 +2148,7 @@ impl FtsCursor {
             .filter_map(|(col, field)| {
                 attachment
                     .field_weights
-                    .get(&col.name)
+                    .get(IdentKeyStr::new(&col.name))
                     .map(|&boost| (*field, boost))
             })
             .collect();
@@ -4075,9 +4081,10 @@ impl IndexMethodCursor for FtsCursor {
 #[cfg(test)]
 mod tests {
     use super::{
-        FtsCursor, FtsIndexAttachment, PendingFileMutations, DEFAULT_MEMORY_BUDGET_BYTES,
-        FTS_PATTERN_MATCH, FTS_PATTERN_MATCH_LIMIT, FTS_PATTERN_SCORE,
+        parse_field_weights, FtsCursor, FtsIndexAttachment, PendingFileMutations,
+        DEFAULT_MEMORY_BUDGET_BYTES, FTS_PATTERN_MATCH, FTS_PATTERN_MATCH_LIMIT, FTS_PATTERN_SCORE,
     };
+    use crate::IdentKey;
     use crate::{
         index_method::{
             IndexMethodAttachment, IndexMethodConfiguration, IndexMethodCostContext,
@@ -4094,6 +4101,14 @@ mod tests {
         Index, SegmentMeta, TantivyDocument,
     };
     use turso_parser::ast::{Expr, Literal, UnaryOperator, Variable};
+
+    #[test]
+    fn field_weight_columns_use_sqlite_identifier_rules() {
+        let columns = [IndexColumn::new("Title", 0)];
+        let weights = parse_field_weights("\"TITLE\"=2.0", &columns).unwrap();
+
+        assert_eq!(weights.get(crate::IdentKeyStr::new("title")), Some(&2.0));
+    }
 
     fn only_flush(mutations: &mut PendingFileMutations) -> (PathBuf, Option<Vec<u8>>) {
         let flushes = mutations.take_flushes();
@@ -4146,7 +4161,7 @@ mod tests {
             table_name: "docs".to_string(),
             index_name: "docs_fts".to_string(),
             columns: vec![IndexColumn::new("title", 1), IndexColumn::new("body", 2)],
-            parameters: FxHashMap::<String, Value>::default(),
+            parameters: FxHashMap::<IdentKey, Value>::default(),
         })
         .unwrap();
 
@@ -4163,7 +4178,7 @@ mod tests {
             table_name: "docs".to_string(),
             index_name: "docs_fts".to_string(),
             columns: vec![IndexColumn::new("body", 1)],
-            parameters: FxHashMap::<String, Value>::default(),
+            parameters: FxHashMap::<IdentKey, Value>::default(),
         })
         .unwrap();
         let cursor = attachment.init().unwrap();

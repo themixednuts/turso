@@ -4066,13 +4066,13 @@ pub struct MvStore<Clock: LogicalClock, A: ConcurrentAllocator = TursoAllocator>
     table_id_to_last_rowid: RwLock<HashMap<MVTableId, Arc<RowidAllocator>>>,
     /// Per-sequence first value not guaranteed safe to read past based only on
     /// durable/current sequence state. Active allocations can lower this.
-    sequence_watermarks: Mutex<HashMap<String, i64>>,
+    sequence_watermarks: Mutex<HashMap<crate::IdentKey, i64>>,
     /// Per-sequence minimum allocated value for each active transaction.
     ///
     /// This is in-memory and therefore only correct while all MVCC writers for a
     /// database live in one process. Multi-process MVCC will need a shared
     /// coordination mechanism before sync can rely on this watermark.
-    sequence_allocations: Mutex<HashMap<String, StdHashMap<TxID, i64>>>,
+    sequence_allocations: Mutex<HashMap<crate::IdentKey, StdHashMap<TxID, i64>>>,
 
     /// Approximate count of live row versions across `rows` + `index_rows`.
     /// Incremented on every inserted version, decremented when versions are
@@ -4178,10 +4178,9 @@ impl<Clock: LogicalClock, A: ConcurrentAllocator> MvStore<Clock, A> {
         table_valued_functions: &[Arc<crate::vtab::VirtualTable>],
     ) {
         for vtab in table_valued_functions {
-            let normalized_name = crate::util::normalize_ident(&vtab.name);
             schema
                 .tables
-                .entry(normalized_name)
+                .entry(crate::IdentKey::from_unquoted(&vtab.name))
                 .or_insert_with(|| Arc::new(Table::Virtual(vtab.clone())));
         }
     }
@@ -6230,7 +6229,7 @@ impl<Clock: LogicalClock, A: ConcurrentAllocator> MvStore<Clock, A> {
             "sequence allocation must be registered while the transaction is active or preparing"
         );
 
-        let sequence_name = crate::util::normalize_ident(sequence_name);
+        let sequence_name = crate::IdentKey::from_unquoted(sequence_name);
         let mut allocations = self.sequence_allocations.lock();
         let tx_allocations = allocations.entry(sequence_name).or_default();
         tx_allocations
@@ -6241,7 +6240,7 @@ impl<Clock: LogicalClock, A: ConcurrentAllocator> MvStore<Clock, A> {
     }
 
     pub fn set_sequence_watermark(&self, sequence_name: &str, watermark: i64) {
-        let sequence_name = crate::util::normalize_ident(sequence_name);
+        let sequence_name = crate::IdentKey::from_unquoted(sequence_name);
         self.sequence_watermarks
             .lock()
             .insert(sequence_name, watermark);
@@ -6253,12 +6252,11 @@ impl<Clock: LogicalClock, A: ConcurrentAllocator> MvStore<Clock, A> {
     /// watermark. The value is the minimum of the current sequence boundary and
     /// any lower value already allocated by an active transaction.
     pub fn sequence_watermark(&self, sequence_name: &str) -> Option<i64> {
-        let sequence_name = crate::util::normalize_ident(sequence_name);
         let mut allocations = self.sequence_allocations.lock();
         let mut remove_allocations = false;
         let active_watermark = {
             allocations
-                .get_mut(&sequence_name)
+                .get_mut(crate::IdentKeyStr::new(sequence_name))
                 .and_then(|tx_allocations| {
                     tx_allocations.retain(|tx_id, _| {
                         self.txs.get(tx_id).is_some_and(|tx| {
@@ -6276,9 +6274,13 @@ impl<Clock: LogicalClock, A: ConcurrentAllocator> MvStore<Clock, A> {
                 })
         };
         if remove_allocations {
-            allocations.remove(&sequence_name);
+            allocations.remove(crate::IdentKeyStr::new(sequence_name));
         }
-        let current_watermark = self.sequence_watermarks.lock().get(&sequence_name).copied();
+        let current_watermark = self
+            .sequence_watermarks
+            .lock()
+            .get(crate::IdentKeyStr::new(sequence_name))
+            .copied();
         match (current_watermark, active_watermark) {
             (Some(current), Some(active)) => Some(current.min(active)),
             (Some(current), None) => Some(current),
@@ -8519,9 +8521,10 @@ impl<Clock: LogicalClock, A: ConcurrentAllocator> MvStore<Clock, A> {
         fresh.schema_version = cookie;
         let mut from_sql_indexes = crate::alloc::vec![];
         let mut automatic_indices = HashMap::default();
-        let mut dbsp_state_roots: HashMap<String, i64> = HashMap::default();
-        let mut dbsp_state_index_roots: HashMap<String, i64> = HashMap::default();
-        let mut materialized_view_info: HashMap<String, (String, i64)> = HashMap::default();
+        let mut dbsp_state_roots: HashMap<crate::IdentKey, i64> = HashMap::default();
+        let mut dbsp_state_index_roots: HashMap<crate::IdentKey, i64> = HashMap::default();
+        let mut materialized_view_info: HashMap<crate::IdentKey, (String, i64)> =
+            HashMap::default();
         let syms = connection.syms.read();
         let mv_store = connection.db.get_mv_store().clone();
 
@@ -8583,7 +8586,7 @@ impl<Clock: LogicalClock, A: ConcurrentAllocator> MvStore<Clock, A> {
                 connection
                     .attached_databases()
                     .read()
-                    .get_database_by_name(&crate::util::normalize_ident(alias))
+                    .get_database_by_name(alias)
                     .map(|(idx, _)| idx)
             };
             fresh.handle_schema_row(
@@ -9469,11 +9472,12 @@ impl<Clock: LogicalClock, A: ConcurrentAllocator> MvStore<Clock, A> {
         fresh.schema_version = cookie;
         let mut from_sql_indexes =
             crate::alloc::Vec::try_with_capacity_ext(10).expect(crate::alloc::ALLOC_ERR_MSG);
-        let mut automatic_indices: HashMap<String, crate::alloc::Vec<(String, i64)>> =
+        let mut automatic_indices: HashMap<crate::IdentKey, crate::alloc::Vec<(String, i64)>> =
             HashMap::default();
-        let mut dbsp_state_roots: HashMap<String, i64> = HashMap::default();
-        let mut dbsp_state_index_roots: HashMap<String, i64> = HashMap::default();
-        let mut materialized_view_info: HashMap<String, (String, i64)> = HashMap::default();
+        let mut dbsp_state_roots: HashMap<crate::IdentKey, i64> = HashMap::default();
+        let mut dbsp_state_index_roots: HashMap<crate::IdentKey, i64> = HashMap::default();
+        let mut materialized_view_info: HashMap<crate::IdentKey, (String, i64)> =
+            HashMap::default();
         let syms = connection.syms.read();
         let mv_store = connection.db.get_mv_store().clone();
 
@@ -9535,7 +9539,7 @@ impl<Clock: LogicalClock, A: ConcurrentAllocator> MvStore<Clock, A> {
                 connection
                     .attached_databases()
                     .read()
-                    .get_database_by_name(&crate::util::normalize_ident(alias))
+                    .get_database_by_name(alias)
                     .map(|(idx, _)| idx)
             };
             fresh.handle_schema_row(

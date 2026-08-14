@@ -2,8 +2,13 @@ mod aliases;
 mod catalog;
 mod copy;
 mod functions;
+mod schema_files;
 mod session;
 
+pub use schema_files::{
+    dropped_postgres_schema_file_name, postgres_schema_file_name,
+    postgres_schema_name_from_file_name,
+};
 pub use session::PgConnection as Connection;
 pub use session::{
     open_database, open_database_with_io, split_statements, PgConnection, PgQueryRunner,

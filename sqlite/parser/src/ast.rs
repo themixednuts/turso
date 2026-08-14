@@ -3,7 +3,8 @@ pub mod fmt;
 
 use std::{num::NonZeroU32, sync::Arc};
 
-use crate::lexer::is_quotable_keyword;
+use crate::{lexer::is_quotable_keyword, IdentKey, IdentKeyStr};
+use identstr::{BoxStorage, IdentStr, Input, Quote};
 use strum_macros::{EnumIter, EnumString};
 
 /// `?` or `$` Prepared statement arg placeholder(s)
@@ -1144,23 +1145,10 @@ pub struct GroupBy {
 /// identifier or string or `CROSS` or `FULL` or `INNER` or `LEFT` or `NATURAL` or `OUTER` or `RIGHT`.
 ///
 /// Two Names are equal if they refer to the same identifier, regardless of
-/// quoting style (e.g. `ABORT` and `"ABORT"` are the same identifier).
-#[derive(Clone, Debug, Eq)]
+/// ASCII case or quoting style (e.g. `abort` and `"ABORT"` are the same identifier).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Name {
-    quote: Option<char>,
-    value: String,
-}
-
-impl PartialEq for Name {
-    fn eq(&self, other: &Self) -> bool {
-        self.value == other.value
-    }
-}
-
-impl std::hash::Hash for Name {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.value.hash(state);
-    }
+    value: IdentStr,
 }
 
 #[cfg(feature = "serde")]
@@ -1169,7 +1157,7 @@ impl serde::Serialize for Name {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(&self.value)
+        serializer.serialize_str(self.value.as_str())
     }
 }
 
@@ -1202,9 +1190,17 @@ impl Name {
     /// Create name which will have exactly the value of given string
     /// (e.g. if s = "\"str\"" - the name value will contain quotes and translation to SQL will give us """str""")
     pub fn exact(s: String) -> Self {
+        Self::exact_input(s)
+    }
+
+    /// Copies unquoted text into a name, using inline storage when possible.
+    pub fn exact_ref(s: &str) -> Self {
+        Self::exact_input(s)
+    }
+
+    fn exact_input(s: impl Input<BoxStorage>) -> Self {
         Self {
-            value: s,
-            quote: None,
+            value: IdentStr::from_unquoted(s),
         }
     }
     /// Parse name from the bytes (e.g. handle quoting and handle escaped quotes)
@@ -1213,84 +1209,80 @@ impl Name {
     }
     pub const fn empty() -> Self {
         Self {
-            value: String::new(),
-            quote: None,
+            value: IdentStr::empty(),
         }
     }
     /// Create a name parsed from a bracket-quoted identifier (`[name]`),
     /// remembering the bracket quoting so the name renders back as written.
-    pub const fn bracketed(s: String) -> Self {
+    pub fn bracketed(s: String) -> Self {
+        Self::bracketed_input(s)
+    }
+
+    /// Copies bracket-quoted text into a name, using inline storage when possible.
+    pub fn bracketed_ref(s: &str) -> Self {
+        Self::bracketed_input(s)
+    }
+
+    fn bracketed_input(s: impl Input<BoxStorage>) -> Self {
         Self {
-            value: s,
-            quote: Some('['),
+            value: IdentStr::with_quote(s, Quote::Bracket),
         }
     }
     /// Parse name from the string (e.g. handle quoting and handle escaped quotes)
     pub fn from_string(s: impl AsRef<str>) -> Self {
         let s = s.as_ref();
-        let bytes = s.as_bytes();
-
-        if s.is_empty() {
-            return Name::exact(s.to_string());
+        if s.starts_with('[') && s.ends_with(']') {
+            return Self::bracketed(s[1..s.len() - 1].to_owned());
         }
-
-        if matches!(bytes[0], b'"' | b'\'' | b'`') {
-            assert!(s.len() >= 2);
-            assert!(bytes[bytes.len() - 1] == bytes[0]);
-            let s = match bytes[0] {
-                b'"' => s[1..s.len() - 1].replace("\"\"", "\""),
-                b'\'' => s[1..s.len() - 1].replace("''", "'"),
-                b'`' => s[1..s.len() - 1].replace("``", "`"),
-                _ => unreachable!(),
-            };
-            Name {
-                value: s,
-                quote: Some(bytes[0] as char),
-            }
-        } else if bytes[0] == b'[' {
-            assert!(s.len() >= 2);
-            assert!(bytes[bytes.len() - 1] == b']');
-            Name::bracketed(s[1..s.len() - 1].to_string())
-        } else {
-            Name::exact(s.to_string())
+        Self {
+            value: IdentStr::new(s),
         }
     }
 
     /// Return string value of the name
     pub fn as_str(&self) -> &str {
-        &self.value
+        self.value.as_str()
+    }
+
+    /// Returns an allocation-free view for identifier lookup.
+    ///
+    /// The view's `as_str()` is the original, unquoted text. Its equality,
+    /// ordering, and hash operations use SQLite's ASCII case-insensitive rules.
+    pub fn as_key_str(&self) -> &IdentKeyStr {
+        IdentKeyStr::new(self.value.as_str())
+    }
+
+    /// Returns an owned, ASCII-case-folded key for identifier maps and sets.
+    pub fn to_key(&self) -> IdentKey {
+        self.value.to_key()
     }
 
     /// Convert value to the string literal (e.g. single-quoted string with escaped single quotes)
     pub fn as_literal(&self) -> String {
-        format!("'{}'", self.value.replace("'", "''"))
+        format!("'{}'", self.value.as_str().replace("'", "''"))
     }
 
     /// Convert value to the name string (e.g. double-quoted string with escaped double quotes)
     pub fn as_ident(&self) -> String {
         // let's keep original quotes if they were set
         // (parser.rs tests validates that behaviour)
-        if self.quote == Some('[') {
+        if self.value.quote() == Some(Quote::Bracket) {
             // A `]` cannot be escaped inside a bracket-quoted identifier, so
             // fall back to double quotes when the name contains one.
-            if !self.value.contains(']') {
-                return format!("[{}]", self.value);
+            if self.value.as_str().contains(']') {
+                return format!("\"{}\"", self.value.as_str().replace('"', "\"\""));
             }
-            return format!("\"{}\"", self.value.replace('"', "\"\""));
+            return self.value.to_quoted_string();
         }
-        if let Some(quote) = self.quote {
-            let single = quote.to_string();
-            let double = single.clone() + &single;
-            return quote.to_string()
-                + self.value.replace(&single, &double).as_str()
-                + quote.to_string().as_str();
+        if self.value.quote().is_some() {
+            return self.value.to_quoted_string();
         }
         let value = self.value.as_bytes();
         let safe_char = |&c: &u8| c.is_ascii_alphanumeric() || c == b'_';
         if !value.is_empty() && value.iter().all(safe_char) && !is_quotable_keyword(value) {
-            self.value.clone()
+            self.value.as_str().to_owned()
         } else {
-            format!("\"{}\"", self.value.replace("\"", "\"\""))
+            format!("\"{}\"", self.value.as_str().replace("\"", "\"\""))
         }
     }
 
@@ -1300,11 +1292,86 @@ impl Name {
     ///
     /// Also, used to detect string literals in PRAGMA cases
     pub fn quoted_with(&self, quote: char) -> bool {
-        self.quote == Some(quote)
+        self.value
+            .quote()
+            .is_some_and(|style| style.open() == quote)
     }
 
-    pub const fn quoted(&self) -> bool {
-        self.quote.is_some()
+    pub fn quoted(&self) -> bool {
+        self.value.quote().is_some()
+    }
+}
+
+impl PartialEq<str> for Name {
+    fn eq(&self, other: &str) -> bool {
+        self.value == other
+    }
+}
+
+impl PartialEq<&str> for Name {
+    fn eq(&self, other: &&str) -> bool {
+        self.value == *other
+    }
+}
+
+impl PartialEq<String> for Name {
+    fn eq(&self, other: &String) -> bool {
+        self.value == other
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::Name;
+
+    #[test]
+    fn names_compare_by_sqlite_identifier_rules() {
+        let lower = Name::exact("users".to_owned());
+        let quoted_upper = Name::from_string("\"USERS\"");
+
+        assert_eq!(lower, quoted_upper);
+        assert_eq!(lower, "UsErS");
+        assert_ne!(Name::exact("É".to_owned()), Name::exact("é".to_owned()));
+    }
+
+    #[test]
+    fn equal_names_have_equal_hashes() {
+        let mut names = std::collections::HashSet::new();
+        names.insert(Name::exact("users".to_owned()));
+        names.insert(Name::from_string("`USERS`"));
+
+        assert_eq!(names.len(), 1);
+    }
+
+    #[test]
+    fn short_parsed_names_use_inline_storage() {
+        let parsed = Name::from_bytes(b"users");
+        let exact = Name::exact_ref("users");
+        let bracketed = Name::bracketed_ref("users");
+
+        assert!(parsed.value.is_inline());
+        assert!(parsed.to_key().is_inline());
+        assert!(exact.value.is_inline());
+        assert!(bracketed.value.is_inline());
+    }
+
+    #[test]
+    fn names_provide_case_insensitive_map_keys() {
+        let mut names = std::collections::HashMap::new();
+        names.insert(Name::from_string("\"Users\"").to_key(), 1);
+
+        assert_eq!(
+            names.get(Name::exact("USERS".to_owned()).as_key_str()),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn name_rendering_preserves_quote_style() {
+        assert_eq!(Name::from_string("\"a\"\"b\"").as_ident(), "\"a\"\"b\"");
+        assert_eq!(Name::from_string("`a``b`").as_ident(), "`a``b`");
+        assert_eq!(Name::bracketed_ref("a b").as_ident(), "[a b]");
+        assert_eq!(Name::bracketed_ref("a]b").as_ident(), "\"a]b\"");
     }
 }
 

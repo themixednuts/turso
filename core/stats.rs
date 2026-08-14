@@ -1,11 +1,11 @@
 use crate::sync::Arc;
+use crate::{IdentKey, IdentKeyStr};
 use rustc_hash::FxHashMap as HashMap;
 
 use crate::alloc::TursoVecExt;
 use crate::schema::Schema;
 use crate::translate::emitter::TransactionMode;
 use crate::types::IOResult;
-use crate::util::normalize_ident;
 use crate::{Connection, Result, Statement, TransactionState, Value};
 pub const STATS_TABLE: &str = "sqlite_stat1";
 const STATS_QUERY: &str = "SELECT tbl, idx, stat FROM sqlite_stat1";
@@ -38,14 +38,15 @@ pub struct TableStat {
     /// Estimated row count for the table (sqlite_stat1 entry with a NULL index name).
     pub row_count: Option<u64>,
     /// Per-index statistics keyed by normalized index name.
-    pub index_stats: HashMap<String, IndexStat>,
+    pub index_stats: HashMap<IdentKey, IndexStat>,
 }
 
 impl TableStat {
     /// Get or create the per-index statistics bucket for the given index name.
     pub fn index_stats_mut(&mut self, index_name: &str) -> &mut IndexStat {
-        let index_name = normalize_ident(index_name);
-        self.index_stats.entry(index_name).or_default()
+        self.index_stats
+            .entry(IdentKey::from_unquoted(index_name))
+            .or_default()
     }
 }
 
@@ -53,7 +54,7 @@ impl TableStat {
 #[derive(Clone, Debug, Default)]
 pub struct AnalyzeStats {
     /// Per-table statistics keyed by normalized table name.
-    pub tables: HashMap<String, TableStat>,
+    pub tables: HashMap<IdentKey, TableStat>,
 }
 
 impl AnalyzeStats {
@@ -62,28 +63,25 @@ impl AnalyzeStats {
     }
     /// Get the statistics for a table, if present.
     pub fn table_stats(&self, table_name: &str) -> Option<&TableStat> {
-        let table_name = normalize_ident(table_name);
-        self.tables.get(&table_name)
+        self.tables.get(IdentKeyStr::new(table_name))
     }
 
     /// Get or create the statistics bucket for a table.
     pub fn table_stats_mut(&mut self, table_name: &str) -> &mut TableStat {
-        let table_name = normalize_ident(table_name);
-        self.tables.entry(table_name).or_default()
+        self.tables
+            .entry(IdentKey::from_unquoted(table_name))
+            .or_default()
     }
 
     /// Remove all statistics for a table.
     pub fn remove_table(&mut self, table_name: &str) {
-        let table_name = normalize_ident(table_name);
-        self.tables.remove(&table_name);
+        self.tables.remove(IdentKeyStr::new(table_name));
     }
 
     /// Remove statistics for a specific index on a table.
     pub fn remove_index(&mut self, table_name: &str, index_name: &str) {
-        let table_name = normalize_ident(table_name);
-        let index_name = normalize_ident(index_name);
-        if let Some(table_stats) = self.tables.get_mut(&table_name) {
-            table_stats.index_stats.remove(&index_name);
+        if let Some(table_stats) = self.tables.get_mut(IdentKeyStr::new(table_name)) {
+            table_stats.index_stats.remove(IdentKeyStr::new(index_name));
         }
     }
 }
@@ -253,14 +251,14 @@ fn load_sqlite_stat1_row(
     }
 
     // Index-level entry: only keep if the index exists on this table.
-    let idx_name = normalize_ident(idx_name.unwrap());
-    if schema.get_index(table_name, &idx_name).is_none() {
+    let idx_name = idx_name.unwrap();
+    if schema.get_index(table_name, idx_name).is_none() {
         return Ok(());
     }
 
     let total_rows = numbers.first().copied();
     {
-        let idx_stats = stats.table_stats_mut(table_name).index_stats_mut(&idx_name);
+        let idx_stats = stats.table_stats_mut(table_name).index_stats_mut(idx_name);
         idx_stats.total_rows = total_rows;
         idx_stats.avg_rows_per_distinct_prefix = numbers.iter().skip(1).copied().collect();
     }

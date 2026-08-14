@@ -13,6 +13,7 @@ use crate::schema::{Schema, Type};
 use crate::sync::Arc;
 use crate::turso_assert_ne;
 use crate::types::Value;
+use crate::IdentKey;
 use crate::{LimboError, Result};
 use rustc_hash::FxHashMap as HashMap;
 use std::fmt::{self, Display, Formatter};
@@ -263,7 +264,7 @@ pub struct Values {
 /// WITH clause - CTEs
 #[derive(Debug, Clone, PartialEq)]
 pub struct WithCTE {
-    pub ctes: HashMap<String, Arc<LogicalPlan>>,
+    pub ctes: HashMap<crate::IdentKey, Arc<LogicalPlan>>,
     pub body: Arc<LogicalPlan>,
 }
 
@@ -410,7 +411,7 @@ pub type AggregateFunction = AggFunc;
 /// Compiler from AST to LogicalPlan
 pub struct LogicalPlanBuilder<'a> {
     schema: &'a Schema,
-    ctes: HashMap<String, Arc<LogicalPlan>>,
+    ctes: HashMap<IdentKey, Arc<LogicalPlan>>,
 }
 
 impl<'a> LogicalPlanBuilder<'a> {
@@ -457,7 +458,7 @@ impl<'a> LogicalPlanBuilder<'a> {
         // Build each CTE
         for cte in &with.ctes {
             let cte_plan = self.build_select(&cte.select)?;
-            let cte_name = Self::name_to_string(&cte.tbl_name);
+            let cte_name = cte.tbl_name.to_key();
             cte_plans.insert(cte_name.clone(), Arc::new(cte_plan));
             self.ctes
                 .insert(cte_name.clone(), cte_plans[&cte_name].clone());
@@ -470,7 +471,7 @@ impl<'a> LogicalPlanBuilder<'a> {
 
         // Clear CTEs from builder context
         for cte in &with.ctes {
-            self.ctes.remove(&Self::name_to_string(&cte.tbl_name));
+            self.ctes.remove(cte.tbl_name.as_key_str());
         }
 
         Ok(LogicalPlan::WithCTE(WithCTE {
@@ -596,9 +597,9 @@ impl<'a> LogicalPlanBuilder<'a> {
             ast::SelectTable::Table(name, alias, _indexed) => {
                 let table_name = Self::name_to_string(&name.name);
                 // Check if it's a CTE reference
-                if let Some(cte_plan) = self.ctes.get(&table_name) {
+                if let Some(cte_plan) = self.ctes.get(name.name.as_key_str()) {
                     return Ok(LogicalPlan::CTERef(CTERef {
-                        name: table_name.clone(),
+                        name: table_name,
                         schema: cte_plan.schema().clone(),
                     }));
                 }
@@ -849,7 +850,7 @@ impl<'a> LogicalPlanBuilder<'a> {
                 .iter()
                 .any(|col| col.name == left_col.name)
             {
-                common_columns.push(ast::Name::exact(left_col.name.clone()));
+                common_columns.push(ast::Name::exact_ref(&left_col.name));
             }
         }
 
@@ -2408,6 +2409,7 @@ mod tests {
     use crate::schema::{
         BTreeCharacteristics, BTreeTable, ColDef, Column as SchemaColumn, Schema, Type,
     };
+    use crate::IdentKeyStr;
     use turso_parser::parser::Parser;
 
     fn create_test_schema() -> Schema {
@@ -2818,15 +2820,15 @@ mod tests {
     #[test]
     fn test_with_cte() {
         let schema = create_test_schema();
-        let sql = "WITH active_users AS (SELECT * FROM users WHERE age > 18) SELECT name FROM active_users";
+        let sql = "WITH \"Active_Users\" AS (SELECT * FROM users WHERE age > 18) SELECT name FROM ACTIVE_USERS";
         let plan = parse_and_build(sql, &schema).unwrap();
 
         match plan {
             LogicalPlan::WithCTE(with) => {
                 assert_eq!(with.ctes.len(), 1);
-                assert!(with.ctes.contains_key("active_users"));
+                assert!(with.ctes.contains_key(IdentKeyStr::new("active_users")));
 
-                let cte = &with.ctes["active_users"];
+                let cte = &with.ctes[IdentKeyStr::new("active_users")];
                 match &**cte {
                     LogicalPlan::Projection(proj) => match &*proj.input {
                         LogicalPlan::Filter(_) => {}
@@ -2838,7 +2840,7 @@ mod tests {
                 match &*with.body {
                     LogicalPlan::Projection(proj) => match &*proj.input {
                         LogicalPlan::CTERef(cte_ref) => {
-                            assert_eq!(cte_ref.name, "active_users");
+                            assert_eq!(cte_ref.name, "ACTIVE_USERS");
                         }
                         _ => panic!("Expected CTERef"),
                     },

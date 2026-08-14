@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use turso_core::schema::{Schema, Table};
 use turso_core::{Connection, LimboError, Result, Value};
-use turso_parser::ast::RefAct;
+use turso_parser::{ast::RefAct, IdentKey};
 
 const USER_TABLE_OID_START: i64 = 16384;
 
@@ -234,7 +234,7 @@ fn exec_pg_input_is_valid(input: &Value, type_name: &str) -> Value {
     Value::from_i64(if valid { 1 } else { 0 })
 }
 
-fn user_tables_sorted(schema: &Schema) -> Vec<(&String, &Arc<Table>)> {
+fn user_tables_sorted(schema: &Schema) -> Vec<(&str, &Arc<Table>)> {
     let mut tables: Vec<_> = schema
         .tables
         .iter()
@@ -248,6 +248,7 @@ fn user_tables_sorted(schema: &Schema) -> Vec<(&String, &Arc<Table>)> {
             }
             matches!(table.as_ref(), Table::BTree(_))
         })
+        .map(|(name, table)| (name.as_str(), table))
         .collect();
     tables.sort_by_key(|(name, _)| *name);
     tables
@@ -407,10 +408,11 @@ pub(crate) fn validate_pg_input(input: &str, type_name: &str) -> Option<(String,
             let base = type_name[..pos].trim();
             let mod_str = type_name[pos + 1..].trim_end_matches(')').trim();
             let modifier = mod_str.parse::<usize>().ok();
-            (base.to_lowercase(), modifier)
+            (base, modifier)
         }
-        None => (type_name.to_lowercase(), None),
+        None => (type_name, None),
     };
+    let base_type = IdentKey::from_unquoted(base_type);
 
     match base_type.as_str() {
         "bool" | "boolean" => {

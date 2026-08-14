@@ -7,7 +7,7 @@ use turso_ext::{
     ValueDestructor,
 };
 
-use crate::LimboError;
+use crate::{translate::collate::CollationSeq, LimboError};
 
 pub type ContextCollationFunction = unsafe extern "C" fn(
     context: usize,
@@ -27,7 +27,7 @@ pub struct ExternalFunc {
 }
 
 pub struct ExternalCollation {
-    pub name: String,
+    pub collation: CollationSeq,
     pub context: usize,
     pub callback: ContextCollationFunction,
     pub context_destructor: Option<ContextDestructor>,
@@ -35,13 +35,13 @@ pub struct ExternalCollation {
 
 impl ExternalCollation {
     pub fn new(
-        name: String,
+        collation: CollationSeq,
         context: usize,
         callback: ContextCollationFunction,
         context_destructor: Option<ContextDestructor>,
     ) -> Self {
         Self {
-            name,
+            collation,
             context,
             callback,
             context_destructor,
@@ -60,7 +60,7 @@ impl Drop for ExternalCollation {
 impl Debug for ExternalCollation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ExternalCollation")
-            .field("name", &self.name)
+            .field("name", &self.collation.name())
             .finish()
     }
 }

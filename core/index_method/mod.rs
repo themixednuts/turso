@@ -8,7 +8,7 @@ use crate::{
     storage::btree::BTreeCursor,
     types::{IOResult, IndexInfo, KeyInfo},
     vdbe::Register,
-    Connection, LimboError, Result, Value,
+    Connection, IdentKey, LimboError, Result, Value,
 };
 
 pub mod backing_btree;
@@ -38,7 +38,7 @@ pub struct IndexMethodConfiguration {
     /// columns c1, c2, c3, ... provided to the index method (e.g. create index t_idx on t using method (c1, c2, c3, ...))
     pub columns: crate::alloc::Vec<IndexColumn>,
     /// optional parameters provided to the index method through WITH clause
-    pub parameters: HashMap<String, Value>,
+    pub parameters: HashMap<IdentKey, Value>,
 }
 
 /// index method attached to the table with specific configuration

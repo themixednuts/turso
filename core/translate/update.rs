@@ -10,7 +10,6 @@ use crate::translate::planner::ROWID_STRS;
 use crate::{
     bail_parse_error,
     schema::{Schema, Table},
-    util::normalize_ident,
     vdbe::builder::{ProgramBuilder, ProgramBuilderOpts},
     CaptureDataChangesExt, Connection,
 };
@@ -311,17 +310,18 @@ fn prepare_update_plan(
         check_update_from_column_ambiguity(from_tables.joined_tables(), connection.as_ref())?;
     }
 
-    let target_identifier = body.tbl_name.alias.as_ref().map_or_else(
-        || normalize_ident(body.tbl_name.name.as_str()),
-        |alias| normalize_ident(alias.as_str()),
-    );
-    let target_table_name = normalize_ident(body.tbl_name.name.as_str());
+    let target_identifier = body
+        .tbl_name
+        .alias
+        .as_ref()
+        .map_or_else(|| body.tbl_name.name.to_key(), |alias| alias.to_key());
+    let target_table_name = body.tbl_name.name.to_key();
     let mut non_from_clause_subqueries = vec![];
     // Reject fairly specific cases like UPDATE t SET x=5 FROM t.
     let illegal_target_reference = from_tables.joined_tables().iter().any(|joined| {
         joined.database_id == database_id
-            && normalize_ident(joined.identifier.as_str()) == target_identifier
-            && normalize_ident(joined.table.get_name()) == target_table_name
+            && target_identifier == joined.identifier
+            && target_table_name == joined.table.get_name()
     });
     if illegal_target_reference {
         bail_parse_error!(
@@ -455,11 +455,15 @@ fn collect_update_set_clauses(
     table: &Table,
     table_name: &str,
 ) -> crate::Result<Vec<UpdateSetClause>> {
-    let column_lookup: HashMap<String, usize> = table
+    let column_lookup: HashMap<crate::IdentKey, usize> = table
         .columns()
         .iter()
         .enumerate()
-        .filter_map(|(i, col)| col.name.as_ref().map(|name| (name.to_lowercase(), i)))
+        .filter_map(|(i, col)| {
+            col.name
+                .as_deref()
+                .map(|name| (crate::IdentKey::from_unquoted(name), i))
+        })
         .collect();
     let mut set_clauses: Vec<UpdateSetClause> = Vec::with_capacity(sets.len());
 
@@ -469,19 +473,22 @@ fn collect_update_set_clauses(
 
         for (col_name, expr) in set.col_names.iter().zip(values.into_iter()) {
             let expr = Box::new(expr);
-            let ident = normalize_ident(col_name.as_str());
-
-            let col_index = match column_lookup.get(&ident) {
+            let col_index = match column_lookup.get(col_name.as_key_str()) {
                 Some(idx) => {
                     table.columns()[*idx].ensure_not_generated("UPDATE", col_name.as_str())?;
                     *idx
                 }
-                None if ROWID_STRS.iter().any(|s| s.eq_ignore_ascii_case(&ident)) => table
-                    .columns()
+                None if ROWID_STRS
                     .iter()
-                    .enumerate()
-                    .find(|(_i, c)| c.is_rowid_alias())
-                    .map_or(ROWID_SENTINEL, |(idx, _col)| idx),
+                    .any(|s| s.eq_ignore_ascii_case(col_name.as_str())) =>
+                {
+                    table
+                        .columns()
+                        .iter()
+                        .enumerate()
+                        .find(|(_i, c)| c.is_rowid_alias())
+                        .map_or(ROWID_SENTINEL, |(idx, _col)| idx)
+                }
                 None => crate::bail_parse_error!("no such column: {}.{}", table_name, col_name),
             };
 
@@ -658,7 +665,7 @@ fn check_update_from_column_ambiguity(
             _ => continue,
         };
         for using_col in using {
-            let col_name = normalize_ident(using_col.as_str());
+            let col_name = using_col.as_str();
 
             // Count how many *other* tables expose this column without it
             // being covered by their own USING clause.
@@ -670,7 +677,7 @@ fn check_update_from_column_ambiguity(
                 let has_col = other.columns().iter().any(|c| {
                     c.name
                         .as_ref()
-                        .is_some_and(|n| n.eq_ignore_ascii_case(&col_name))
+                        .is_some_and(|n| n.eq_ignore_ascii_case(col_name))
                 });
                 if !has_col {
                     continue;
@@ -680,7 +687,7 @@ fn check_update_from_column_ambiguity(
                 let already_deduped = other.join_info.as_ref().is_some_and(|info| {
                     info.using
                         .iter()
-                        .any(|u| u.as_str().eq_ignore_ascii_case(&col_name))
+                        .any(|u| u.as_str().eq_ignore_ascii_case(col_name))
                 });
                 if !already_deduped {
                     found_count += 1;

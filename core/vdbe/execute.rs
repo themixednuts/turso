@@ -29,13 +29,13 @@ use crate::types::{
     IOCompletions, IOResult, ImmutableRecord, IndexInfo, SeekResult, Text, ValueIterator,
 };
 use crate::util::{
-    escape_sql_string_literal, normalize_ident, rename_identifiers,
-    rename_identifiers_scoped_when_clause, rewrite_check_expr_table_refs,
-    rewrite_column_level_fk_parent_columns_if_needed, rewrite_column_references_if_needed,
-    rewrite_fk_parent_cols_if_self_ref, rewrite_fk_parent_table_if_needed,
-    rewrite_inline_col_fk_target_if_needed, rewrite_trigger_cmd_column_refs,
-    rewrite_trigger_cmd_table_refs, rewrite_view_sql_for_column_rename,
-    trigger_still_references_renamed_column, trim_ascii_whitespace, RewrittenView,
+    escape_sql_string_literal, rename_identifiers, rename_identifiers_scoped_when_clause,
+    rewrite_check_expr_table_refs, rewrite_column_level_fk_parent_columns_if_needed,
+    rewrite_column_references_if_needed, rewrite_fk_parent_cols_if_self_ref,
+    rewrite_fk_parent_table_if_needed, rewrite_inline_col_fk_target_if_needed,
+    rewrite_trigger_cmd_column_refs, rewrite_trigger_cmd_table_refs,
+    rewrite_view_sql_for_column_rename, trigger_still_references_renamed_column,
+    trim_ascii_whitespace, RewrittenView,
 };
 use crate::vdbe::affinity::{
     apply_numeric_affinity, real_to_i64, try_for_float, Affinity, NumericParseResult, ParsedNumber,
@@ -1396,7 +1396,10 @@ pub fn op_vcreate(
     let table =
         crate::VirtualTable::table(Some(&table_name), &module_name, args, &conn.syms.read())?;
     {
-        conn.syms.write().vtabs.insert(table_name, table);
+        conn.syms
+            .write()
+            .vtabs
+            .insert(crate::IdentKey::from_unquoted(&table_name), table);
     }
     state.pc += 1;
     Ok(InsnFunctionStepResult::Step)
@@ -1601,7 +1604,12 @@ pub fn op_vdestroy(
     load_insn!(VDestroy { db: _, table_name }, insn);
     let conn = program.connection.clone();
     {
-        let Some(vtab) = conn.syms.write().vtabs.remove(table_name) else {
+        let Some(vtab) = conn
+            .syms
+            .write()
+            .vtabs
+            .remove(crate::IdentKeyStr::new(table_name))
+        else {
             mark_unlikely();
             return Err(crate::LimboError::InternalError(
                 "Could not find Virtual Table to Destroy".to_string(),
@@ -9908,16 +9916,16 @@ pub fn op_function(
                     if let Some((schema_name, sequence_name)) = sequence_name.split_once('.') {
                         (
                             program.connection.get_database_id_by_name(schema_name)?,
-                            crate::util::normalize_ident(sequence_name),
+                            sequence_name,
                         )
                     } else {
-                        (MAIN_DB_ID, crate::util::normalize_ident(sequence_name))
+                        (MAIN_DB_ID, sequence_name)
                     };
                 program.connection.find_sequence(sequence_name)?;
                 let watermark = program
                     .connection
                     .mv_store_for_db(db_id)
-                    .and_then(|mv_store| mv_store.sequence_watermark(&sequence_key));
+                    .and_then(|mv_store| mv_store.sequence_watermark(sequence_key));
                 match watermark {
                     Some(watermark) => state.registers[*dest].set_int(watermark),
                     None => state.registers[*dest].set_value(Value::Null),
@@ -10564,7 +10572,9 @@ pub fn op_function(
                 AlterTableFunc::RenameTable => {
                     let rename_from = {
                         match &state.registers[*start_reg + 5].get_value() {
-                            Value::Text(rename_from) => normalize_ident(rename_from.as_str()),
+                            Value::Text(rename_from) => {
+                                String::from(crate::IdentKey::from_unquoted(rename_from.as_str()))
+                            }
                             _ => panic!("rename_from parameter should be TEXT"),
                         }
                     };
@@ -10575,7 +10585,8 @@ pub fn op_function(
                             _ => panic!("rename_to parameter should be TEXT"),
                         }
                     };
-                    let rename_to = normalize_ident(original_rename_to.as_str());
+                    let rename_to =
+                        String::from(crate::IdentKey::from_unquoted(original_rename_to.as_str()));
 
                     let new_name = if let Some(column) =
                         &name.strip_prefix(&format!("sqlite_autoindex_{rename_from}_"))
@@ -10622,15 +10633,13 @@ pub fn op_function(
                                 using,
                                 with_clause,
                             } => {
-                                let table_name = normalize_ident(tbl_name.as_str());
-
-                                if rename_from != table_name {
+                                if tbl_name != rename_from.as_str() {
                                     break 'sql None;
                                 }
 
                                 Some(
                                     ast::Stmt::CreateIndex {
-                                        tbl_name: ast::Name::exact(original_rename_to.to_string()),
+                                        tbl_name: ast::Name::exact_ref(original_rename_to.as_str()),
                                         unique,
                                         if_not_exists,
                                         idx_name,
@@ -10648,8 +10657,6 @@ pub fn op_function(
                                 if_not_exists,
                                 body,
                             } => {
-                                let this_table = normalize_ident(tbl_name.name.as_str());
-
                                 let ast::CreateTableBody::ColumnsAndConstraints {
                                     mut columns,
                                     mut constraints,
@@ -10686,7 +10693,7 @@ pub fn op_function(
 
                                 // Rewrite table-qualified refs in CHECK constraints
                                 // (e.g. t1.a > 0 → t2.a > 0)
-                                if this_table == rename_from {
+                                if tbl_name.name == rename_from.as_str() {
                                     for c in &mut constraints {
                                         if let ast::TableConstraint::Check {
                                             ref mut expr,
@@ -10721,12 +10728,12 @@ pub fn op_function(
                                     }
                                 }
 
-                                if this_table == rename_from {
+                                if tbl_name.name == rename_from.as_str() {
                                     // Rebuild with new table identifier so SQL persists the new name.
                                     let new_stmt = ast::Stmt::CreateTable {
                                         tbl_name: ast::QualifiedName {
                                             db_name: None,
-                                            name: ast::Name::exact(original_rename_to.to_string()),
+                                            name: ast::Name::exact_ref(original_rename_to.as_str()),
                                             alias: None,
                                         },
                                         temporary,
@@ -10772,8 +10779,7 @@ pub fn op_function(
                                 module_name,
                                 args,
                             }) => {
-                                let this_table = normalize_ident(tbl_name.name.as_str());
-                                if this_table != rename_from {
+                                if tbl_name.name != rename_from.as_str() {
                                     None
                                 } else {
                                     let new_stmt =
@@ -10803,18 +10809,17 @@ pub fn op_function(
                                 mut when_clause,
                                 mut commands,
                             } => {
-                                let trigger_tbl = normalize_ident(trigger_tbl_name.name.as_str());
-
                                 // Rewrite ON table name if it matches the renamed table
-                                let new_trigger_tbl_name = if trigger_tbl == rename_from {
-                                    ast::QualifiedName {
-                                        db_name: trigger_tbl_name.db_name,
-                                        name: ast::Name::exact(original_rename_to.to_string()),
-                                        alias: None,
-                                    }
-                                } else {
-                                    trigger_tbl_name
-                                };
+                                let new_trigger_tbl_name =
+                                    if trigger_tbl_name.name == rename_from.as_str() {
+                                        ast::QualifiedName {
+                                            db_name: trigger_tbl_name.db_name,
+                                            name: ast::Name::exact_ref(original_rename_to.as_str()),
+                                            alias: None,
+                                        }
+                                    } else {
+                                        trigger_tbl_name
+                                    };
 
                                 // Rewrite WHEN clause qualified refs
                                 if let Some(ref mut when) = when_clause {
@@ -10858,7 +10863,9 @@ pub fn op_function(
                 AlterTableFunc::AlterColumn | AlterTableFunc::RenameColumn => {
                     let table = {
                         match &state.registers[*start_reg + 5].get_value() {
-                            Value::Text(rename_to) => normalize_ident(rename_to.as_str()),
+                            Value::Text(rename_to) => {
+                                String::from(crate::IdentKey::from_unquoted(rename_to.as_str()))
+                            }
                             _ => panic!("table parameter should be TEXT"),
                         }
                     };
@@ -10869,7 +10876,9 @@ pub fn op_function(
                             _ => panic!("rename_from parameter should be TEXT"),
                         }
                     };
-                    let rename_from = normalize_ident(original_rename_from.as_str());
+                    let rename_from = String::from(crate::IdentKey::from_unquoted(
+                        original_rename_from.as_str(),
+                    ));
 
                     let column_def = {
                         match &state.registers[*start_reg + 7].get_value() {
@@ -10880,8 +10889,6 @@ pub fn op_function(
 
                     let column_def =
                         Parser::new(column_def.as_bytes()).parse_column_definition(true)?;
-
-                    let _rename_to = normalize_ident(column_def.col_name.as_str());
 
                     let new_sql = 'sql: {
                         let Value::Text(sql) = sql else {
@@ -10912,7 +10919,7 @@ pub fn op_function(
                                 using,
                                 with_clause,
                             } => {
-                                if table != normalize_ident(tbl_name.as_str()) {
+                                if tbl_name != table.as_str() {
                                     break 'sql None;
                                 }
 
@@ -10964,13 +10971,14 @@ pub fn op_function(
                                     ));
                                 };
 
-                                let normalized_tbl_name = normalize_ident(tbl_name.name.as_str());
+                                let normalized_tbl_name = tbl_name.name.to_key();
 
                                 if normalized_tbl_name == table {
                                     // This is the table being altered - update its column
-                                    let Some(column) = columns.iter_mut().find(|column| {
-                                        normalize_ident(column.col_name.as_str()) == rename_from
-                                    }) else {
+                                    let Some(column) = columns
+                                        .iter_mut()
+                                        .find(|column| column.col_name == rename_from.as_str())
+                                    else {
                                         // MVCC/temp-schema rewrite can reach an already-updated
                                         // CREATE TABLE SQL image for the target table. Treat that
                                         // as idempotent and keep the existing SQL text.
@@ -10998,8 +11006,7 @@ pub fn op_function(
                                                     else {
                                                         return Err(LimboError::ParseError("Unexpected expression in PRIMARY KEY constraint".to_string()));
                                                     };
-                                                    if normalize_ident(name.as_str()) == rename_from
-                                                    {
+                                                    if name == rename_from.as_str() {
                                                         *col.expr = ast::Expr::Name(Name::exact(
                                                             column_def.col_name.as_str().to_owned(),
                                                         ));
@@ -11016,8 +11023,7 @@ pub fn op_function(
                                                     else {
                                                         return Err(LimboError::ParseError("Unexpected expression in UNIQUE constraint".to_string()));
                                                     };
-                                                    if normalize_ident(name.as_str()) == rename_from
-                                                    {
+                                                    if name == rename_from.as_str() {
                                                         *col.expr = ast::Expr::Name(Name::exact(
                                                             column_def.col_name.as_str().to_owned(),
                                                         ));
@@ -11031,9 +11037,7 @@ pub fn op_function(
                                             } => {
                                                 // Update child columns in this table's FK definitions
                                                 for child_col in child_cols {
-                                                    if normalize_ident(child_col.col_name.as_str())
-                                                        == rename_from
-                                                    {
+                                                    if child_col.col_name == rename_from.as_str() {
                                                         child_col.col_name = Name::exact(
                                                             column_def.col_name.as_str().to_owned(),
                                                         );
@@ -11085,12 +11089,10 @@ pub fn op_function(
                                         } = &mut constraint.constraint
                                         {
                                             // Check if this FK references the table being altered
-                                            if normalize_ident(tbl_name.as_str()) == table {
+                                            if tbl_name == table.as_str() {
                                                 // Update parent column references if they match the renamed column
                                                 for parent_col in parent_cols {
-                                                    if normalize_ident(parent_col.col_name.as_str())
-                                                        == rename_from
-                                                    {
+                                                    if parent_col.col_name == rename_from.as_str() {
                                                         parent_col.col_name = Name::exact(
                                                             column_def.col_name.as_str().to_owned(),
                                                         );
@@ -13277,7 +13279,7 @@ pub fn op_drop_table(
                     }
                 }
                 // Capture index root pages (table may not have indexes)
-                if let Some(indexes) = schema.indexes.get(table_name) {
+                if let Some(indexes) = schema.indexes.get(crate::IdentKeyStr::new(table_name)) {
                     for index in indexes.iter() {
                         if index.root_page > 0 {
                             schema.dropped_root_pages.insert(index.root_page);
@@ -13315,7 +13317,9 @@ pub fn op_drop_view(
     let conn = program.connection.clone();
     conn.with_database_schema_mut(*db, |schema| {
         schema.remove_view(view_name).ok();
-        schema.broken_views.remove(view_name);
+        schema
+            .broken_views
+            .remove(crate::IdentKeyStr::new(view_name));
     })?;
     state.pc += 1;
     Ok(InsnFunctionStepResult::Step)
@@ -13362,9 +13366,10 @@ pub fn op_add_sequence(
     )?;
     let conn = program.connection.clone();
     conn.with_database_schema_mut(*db, |schema| {
-        schema
-            .sequences
-            .insert(crate::util::normalize_ident(name), std::sync::Arc::new(seq));
+        schema.sequences.insert(
+            crate::IdentKey::from_unquoted(name),
+            std::sync::Arc::new(seq),
+        );
     })?;
     state.pc += 1;
     Ok(InsnFunctionStepResult::Step)
@@ -13615,22 +13620,20 @@ pub fn op_sequence_track_allocation(
         .rsplit_once('.')
         .map(|(_, n)| n)
         .unwrap_or(&seq_name);
-    let normalized_seq_name = crate::util::normalize_ident(bare_seq_name);
-
     if let Some(mv_store) = program.connection.mv_store_for_db(*db) {
         let seq = program
             .connection
-            .with_schema(*db, |s| s.get_sequence(&normalized_seq_name).cloned())
+            .with_schema(*db, |s| s.get_sequence(bare_seq_name).cloned())
             .ok_or_else(|| {
                 crate::LimboError::ParseError(format!("sequence \"{seq_name}\" does not exist"))
             })?;
         let current_watermark =
             crate::mvcc::database::first_unsafe_sequence_watermark(&seq, value, true);
-        mv_store.set_sequence_watermark(&normalized_seq_name, current_watermark);
+        mv_store.set_sequence_watermark(bare_seq_name, current_watermark);
 
         if let Some((tx_id, _)) = program.connection.get_mv_tx_for_db(*db) {
             if mv_store.is_tx_rollbackable(tx_id) {
-                mv_store.register_sequence_allocation(tx_id, &normalized_seq_name, value)?;
+                mv_store.register_sequence_allocation(tx_id, bare_seq_name, value)?;
             }
         }
     }
@@ -13707,11 +13710,9 @@ pub fn op_sequence_register_allocation(
         .rsplit_once('.')
         .map(|(_, n)| n)
         .unwrap_or(&seq_name);
-    let normalized_seq_name = crate::util::normalize_ident(bare_seq_name);
-
     if let Some(mv_store) = program.connection.mv_store_for_db(*db) {
         if mv_store.is_tx_rollbackable(outer_tx_id) {
-            mv_store.register_sequence_allocation(outer_tx_id, &normalized_seq_name, value)?;
+            mv_store.register_sequence_allocation(outer_tx_id, bare_seq_name, value)?;
         }
     }
 
@@ -14083,10 +14084,10 @@ pub struct OpParseSchemaInner {
     stmt: crate::Statement,
     schema_arc: Arc<Schema>,
     from_sql_indexes: crate::alloc::Vec<crate::util::UnparsedFromSqlIndex>,
-    automatic_indices: crate::HashMap<String, crate::alloc::Vec<(String, i64)>>,
-    dbsp_state_roots: crate::HashMap<String, i64>,
-    dbsp_state_index_roots: crate::HashMap<String, i64>,
-    materialized_view_info: crate::HashMap<String, (String, i64)>,
+    automatic_indices: crate::HashMap<crate::IdentKey, crate::alloc::Vec<(String, i64)>>,
+    dbsp_state_roots: crate::HashMap<crate::IdentKey, i64>,
+    dbsp_state_index_roots: crate::HashMap<crate::IdentKey, i64>,
+    materialized_view_info: crate::HashMap<crate::IdentKey, (String, i64)>,
     trigger_target_database_id: Option<usize>,
     db: usize,
     previous_auto_commit: bool,
@@ -14242,7 +14243,7 @@ fn op_parse_schema_step(
                 let attached_resolver = |alias: &str| -> Option<usize> {
                     conn.attached_databases()
                         .read()
-                        .get_database_by_name(&crate::util::normalize_ident(alias))
+                        .get_database_by_name(alias)
                         .map(|(idx, _)| idx)
                 };
                 schema.handle_schema_row(
@@ -15744,7 +15745,7 @@ fn regenerate_trigger_sql(trigger: &crate::schema::Trigger) -> String {
     };
     let tbl_name = QualifiedName {
         db_name: None,
-        name: Name::from_string(&trigger.table_name),
+        name: trigger.table_name.clone(),
         alias: None,
     };
     create_trigger_to_sql(
@@ -15807,22 +15808,22 @@ fn rewrite_trigger_for_column_rename(
     old_col: &str,
     new_col: &str,
 ) -> crate::Result<()> {
-    let trigger_tbl = normalize_ident(&trigger.table_name);
+    let trigger_tbl = trigger.table_name.as_str();
     let old_sql = trigger.sql.clone();
     if let Some(ref mut when) = trigger.when_clause {
-        rename_identifiers_scoped_when_clause(when, table_name, &trigger_tbl, old_col, new_col);
+        rename_identifiers_scoped_when_clause(when, table_name, trigger_tbl, old_col, new_col);
     }
-    if trigger_tbl == table_name {
+    if crate::IdentKeyStr::new(trigger_tbl) == table_name {
         if let ast::TriggerEvent::UpdateOf(ref mut cols) = trigger.event {
             for col in cols {
-                if normalize_ident(col.as_str()) == normalize_ident(old_col) {
-                    *col = ast::Name::exact(new_col.to_owned());
+                if col == old_col {
+                    *col = ast::Name::exact_ref(new_col);
                 }
             }
         }
     }
     for cmd in &mut trigger.commands {
-        rewrite_trigger_cmd_column_refs(cmd, table_name, &trigger_tbl, old_col, new_col);
+        rewrite_trigger_cmd_column_refs(cmd, table_name, trigger_tbl, old_col, new_col);
     }
     if trigger_still_references_renamed_column(trigger, table_name, old_col) {
         return Err(LimboError::ParseError(format!(
@@ -15848,13 +15849,16 @@ pub fn op_rename_table(
 ) -> Result<InsnFunctionStepResult> {
     load_insn!(RenameTable { db, from, to }, insn);
 
-    let normalized_from = normalize_ident(from.as_str());
-    let normalized_to = normalize_ident(to.as_str());
+    let normalized_from = String::from(crate::IdentKey::from_unquoted(from.as_str()));
+    let normalized_to = String::from(crate::IdentKey::from_unquoted(to.as_str()));
 
     let conn = program.connection.clone();
 
     conn.with_database_schema_mut(*db, |schema| -> crate::Result<()> {
-        if let Some(mut indexes) = schema.indexes.remove(&normalized_from) {
+        if let Some(mut indexes) = schema
+            .indexes
+            .remove(crate::IdentKeyStr::new(&normalized_from))
+        {
             let autoindex_prefix = format!("sqlite_autoindex_{normalized_from}_");
             indexes.iter_mut().for_each(|index| {
                 let index = Arc::make_mut(index);
@@ -15865,12 +15869,14 @@ pub fn op_rename_table(
                 }
             });
 
-            schema.indexes.insert(normalized_to.to_owned(), indexes);
+            schema
+                .indexes
+                .insert(crate::IdentKey::from_unquoted(&normalized_to), indexes);
         };
 
         let mut table = schema
             .tables
-            .remove(&normalized_from)
+            .remove(crate::IdentKeyStr::new(&normalized_from))
             .expect("table being renamed should be in schema");
         #[cfg(feature = "conn_raw_api")]
         schema.unregister_table_root_page(table.as_ref());
@@ -15880,7 +15886,7 @@ pub fn op_rename_table(
                 // update this table's own foreign keys
                 for fk_arc in &mut btree.foreign_keys {
                     let fk = Arc::make_mut(fk_arc);
-                    if normalize_ident(&fk.parent_table) == normalized_from {
+                    if fk.parent_table.eq_ignore_ascii_case(&normalized_from) {
                         fk.parent_table.clone_from(&normalized_to);
                     }
                 }
@@ -15907,17 +15913,19 @@ pub fn op_rename_table(
 
         #[cfg(feature = "conn_raw_api")]
         schema.register_table_root_page(&normalized_to, table.as_ref());
-        schema.tables.insert(normalized_to.to_owned(), table);
+        schema
+            .tables
+            .insert(crate::IdentKey::from_unquoted(&normalized_to), table);
 
         for (tname, t_arc) in schema.tables.iter_mut() {
             // skip the table we just renamed
-            if normalize_ident(tname) == normalized_to {
+            if tname.eq(&normalized_to) {
                 continue;
             }
             if let Table::BTree(ref mut child_btree_arc) = Arc::make_mut(t_arc) {
                 let child_btree = Arc::make_mut(child_btree_arc);
                 for fk_arc in &mut child_btree.foreign_keys {
-                    if normalize_ident(&fk_arc.parent_table) == normalized_from {
+                    if fk_arc.parent_table.eq_ignore_ascii_case(&normalized_from) {
                         let fk = Arc::make_mut(fk_arc);
                         fk.parent_table.clone_from(&normalized_to);
                     }
@@ -15927,13 +15935,18 @@ pub fn op_rename_table(
 
         // Update triggers: move from old table name key to new, and update
         // each trigger's table_name field and body commands.
-        if let Some(mut triggers) = schema.triggers.remove(&normalized_from) {
+        if let Some(mut triggers) = schema
+            .triggers
+            .remove(crate::IdentKeyStr::new(&normalized_from))
+        {
             for trigger_arc in &mut triggers {
                 let trigger = Arc::make_mut(trigger_arc);
-                normalized_to.clone_into(&mut trigger.table_name);
+                trigger.table_name = Name::exact_ref(&normalized_to);
                 rewrite_trigger_for_table_rename(trigger, &normalized_from, &normalized_to);
             }
-            schema.triggers.insert(normalized_to.to_owned(), triggers);
+            schema
+                .triggers
+                .insert(crate::IdentKey::from_unquoted(&normalized_to), triggers);
         }
 
         // If the renamed table owned an implicit AUTOINCREMENT sequence,
@@ -15949,7 +15962,10 @@ pub fn op_rename_table(
         // implicit sequence for AUTOINCREMENT table" until the next
         // schema reparse.
         let old_seq_name = crate::schema::autoincrement_sequence_name(&normalized_from);
-        if let Some(mut seq_arc) = schema.sequences.remove(&old_seq_name) {
+        if let Some(mut seq_arc) = schema
+            .sequences
+            .remove(crate::IdentKeyStr::new(&old_seq_name))
+        {
             let new_seq_name = crate::schema::autoincrement_sequence_name(&normalized_to);
             // Mutate the Sequence's `name` field so its internal identity
             // tracks the new table. `seq.name` is used by the exhaustion
@@ -15963,12 +15979,20 @@ pub fn op_rename_table(
                 crate::translate::sequence::sequence_backing_table_name(&old_seq_name);
             let new_backing_table =
                 crate::translate::sequence::sequence_backing_table_name(&new_seq_name);
-            schema.sequences.insert(new_seq_name, seq_arc);
-            if let Some(mut backing_arc) = schema.tables.remove(&old_backing_table) {
+            schema
+                .sequences
+                .insert(crate::IdentKey::from_unquoted(&new_seq_name), seq_arc);
+            if let Some(mut backing_arc) = schema
+                .tables
+                .remove(crate::IdentKeyStr::new(&old_backing_table))
+            {
                 if let Table::BTree(btree_arc) = Arc::make_mut(&mut backing_arc) {
                     Arc::make_mut(btree_arc).name.clone_from(&new_backing_table);
                 }
-                schema.tables.insert(new_backing_table, backing_arc);
+                schema.tables.insert(
+                    crate::IdentKey::from_unquoted(&new_backing_table),
+                    backing_arc,
+                );
             }
         }
 
@@ -15994,8 +16018,13 @@ pub fn op_rename_table(
             // move its TEMP triggers to the new name. Changing only the stored
             // SQL would leave them under the old name, so they would no longer
             // run.
-            let temp_shadows_old_name = schema.tables.contains_key(&normalized_from);
-            if let Some(triggers) = schema.triggers.remove(&normalized_from) {
+            let temp_shadows_old_name = schema
+                .tables
+                .contains_key(crate::IdentKeyStr::new(&normalized_from));
+            if let Some(triggers) = schema
+                .triggers
+                .remove(crate::IdentKeyStr::new(&normalized_from))
+            {
                 let mut triggers_to_keep = std::collections::VecDeque::new();
                 let mut triggers_to_rename = std::collections::VecDeque::new();
                 for mut trigger_arc in triggers {
@@ -16005,7 +16034,7 @@ pub fn op_rename_table(
                     };
                     if targets_renamed_database {
                         let trigger = Arc::make_mut(&mut trigger_arc);
-                        normalized_to.clone_into(&mut trigger.table_name);
+                        trigger.table_name = Name::exact_ref(&normalized_to);
                         rewrite_trigger_for_table_rename(trigger, &normalized_from, &normalized_to);
                         triggers_to_rename.push_back(trigger_arc);
                     } else {
@@ -16013,13 +16042,14 @@ pub fn op_rename_table(
                     }
                 }
                 if !triggers_to_keep.is_empty() {
-                    schema
-                        .triggers
-                        .insert(normalized_from.to_owned(), triggers_to_keep);
+                    schema.triggers.insert(
+                        crate::IdentKey::from_unquoted(&normalized_from),
+                        triggers_to_keep,
+                    );
                 }
                 schema
                     .triggers
-                    .entry(normalized_to.to_owned())
+                    .entry(crate::IdentKey::from_unquoted(&normalized_to))
                     .or_default()
                     .extend(triggers_to_rename);
             }
@@ -16058,12 +16088,10 @@ pub fn op_drop_column(
 
     let conn = program.connection.clone();
 
-    let normalized_table_name = normalize_ident(table.as_str());
-
     let column_name = conn.with_schema(*db, |schema| {
         let table = schema
             .tables
-            .get(&normalized_table_name)
+            .get(crate::IdentKeyStr::new(table.as_str()))
             .expect("table being ALTERed should be in schema");
         table
             .get_column_at(*column_index)
@@ -16077,7 +16105,7 @@ pub fn op_drop_column(
     conn.with_database_schema_mut(*db, |schema| -> Result<()> {
         let table = schema
             .tables
-            .get_mut(&normalized_table_name)
+            .get_mut(crate::IdentKeyStr::new(table.as_str()))
             .expect("table being renamed should be in schema");
 
         let table = Arc::get_mut(table).expect("this should be the only strong reference");
@@ -16093,7 +16121,7 @@ pub fn op_drop_column(
         btree.check_constraints.retain(|c| {
             c.column
                 .as_ref()
-                .is_none_or(|col| normalize_ident(col) != normalize_ident(&col_name))
+                .is_none_or(|col| !col.eq_ignore_ascii_case(&col_name))
         });
 
         btree.shift_generated_column_indices_after_drop(*column_index)?;
@@ -16101,7 +16129,7 @@ pub fn op_drop_column(
     })??;
 
     conn.with_schema(*db, |schema| -> crate::Result<()> {
-        if let Some(indexes) = schema.indexes.get(&normalized_table_name) {
+        if let Some(indexes) = schema.indexes.get(crate::IdentKeyStr::new(table.as_str())) {
             for index in indexes {
                 if index
                     .columns
@@ -16121,7 +16149,10 @@ pub fn op_drop_column(
     // expressions, to account for the dropped column. For example, if the dropped column had index
     // 2, then anything that was indexed on column 3 or higher should be decremented by 1.
     conn.with_database_schema_mut(*db, |schema| -> Result<()> {
-        if let Some(indexes) = schema.indexes.get_mut(&normalized_table_name) {
+        if let Some(indexes) = schema
+            .indexes
+            .get_mut(crate::IdentKeyStr::new(table.as_str()))
+        {
             for index in indexes {
                 let index = Arc::get_mut(index).expect("this should be the only strong reference");
                 for index_column in index.columns.iter_mut() {
@@ -16175,14 +16206,13 @@ pub fn op_add_column(
     load_insn!(AddColumn { data }, insn);
 
     let conn = program.connection.clone();
-    let normalized_table_name = normalize_ident(data.table.as_str());
     let new_check_constraints = data.check_constraints.try_to_vec()?;
     let new_foreign_keys = data.foreign_keys.try_to_vec()?;
 
     conn.with_database_schema_mut(data.db, |schema| -> Result<()> {
         let table_ref = schema
             .tables
-            .get_mut(&normalized_table_name)
+            .get_mut(crate::IdentKeyStr::new(data.table.as_str()))
             .expect("table being altered should be in schema");
 
         let table_ref = Arc::make_mut(table_ref);
@@ -16226,11 +16256,10 @@ pub fn op_alter_column(
 
     let conn = program.connection.clone();
 
-    let normalized_table_name = normalize_ident(table_name.as_str());
     let old_column_name = conn.with_schema(*db, |schema| {
         let table = schema
             .tables
-            .get(&normalized_table_name)
+            .get(crate::IdentKeyStr::new(table_name.as_str()))
             .expect("table being ALTERed should be in schema");
         table
             .get_column_at(*column_index)
@@ -16260,7 +16289,7 @@ pub fn op_alter_column(
                         &old_column_name,
                         &new_name,
                     )? {
-                        rewrites.push((*db, view_name.clone(), rewritten));
+                        rewrites.push((*db, view_name.to_string(), rewritten));
                     }
                 }
                 Ok(rewrites)
@@ -16281,7 +16310,7 @@ pub fn op_alter_column(
                             &old_column_name,
                             &new_name,
                         )? {
-                            rewrites.push((crate::TEMP_DB_ID, view_name.clone(), rewritten));
+                            rewrites.push((crate::TEMP_DB_ID, view_name.to_string(), rewritten));
                         }
                     }
                     Ok(rewrites)
@@ -16297,7 +16326,7 @@ pub fn op_alter_column(
     conn.with_database_schema_mut(*db, |schema| -> Result<()> {
         let table_arc = schema
             .tables
-            .get_mut(&normalized_table_name)
+            .get_mut(crate::IdentKeyStr::new(table_name.as_str()))
             .expect("table being ALTERed should be in schema");
         let table = Arc::make_mut(table_arc);
 
@@ -16316,7 +16345,10 @@ pub fn op_alter_column(
             .clone();
 
         // Update this table's indexes that reference the old column.
-        if let Some(idxs) = schema.indexes.get_mut(&normalized_table_name) {
+        if let Some(idxs) = schema
+            .indexes
+            .get_mut(crate::IdentKeyStr::new(table_name.as_str()))
+        {
             for idx in idxs {
                 let idx = Arc::make_mut(idx);
                 for ic in &mut idx.columns {
@@ -16379,9 +16411,8 @@ pub fn op_alter_column(
         }
 
         // Update CHECK constraint expressions to reference the new column name
-        let old_col_normalized = normalize_ident(&old_column_name);
         for check in &mut btree.check_constraints {
-            rename_identifiers(&mut check.expr, &old_col_normalized, &new_name);
+            rename_identifiers(&mut check.expr, &old_column_name, &new_name);
             // The captured source text no longer matches the rewritten
             // expression.
             check.source = None;
@@ -16411,7 +16442,7 @@ pub fn op_alter_column(
                 }
             }
             // parent side: if self-referencing, rename parent column too
-            if normalize_ident(&fk.parent_table) == normalized_table_name {
+            if fk.parent_table.eq_ignore_ascii_case(table_name.as_str()) {
                 for pc in &mut fk.parent_columns {
                     if pc.eq_ignore_ascii_case(&old_column_name) {
                         pc.clone_from(&new_name);
@@ -16422,13 +16453,16 @@ pub fn op_alter_column(
 
         // fix OTHER tables that reference this table as parent
         for (tname, t_arc) in schema.tables.iter_mut() {
-            if normalize_ident(tname) == normalized_table_name {
+            if tname == table_name.as_str() {
                 continue;
             }
             if let Table::BTree(ref mut child_btree_arc) = Arc::make_mut(t_arc) {
                 let child_btree = Arc::make_mut(child_btree_arc);
                 for fk_arc in &mut child_btree.foreign_keys {
-                    if normalize_ident(&fk_arc.parent_table) != normalized_table_name {
+                    if !fk_arc
+                        .parent_table
+                        .eq_ignore_ascii_case(table_name.as_str())
+                    {
                         continue;
                     }
                     let fk = Arc::make_mut(fk_arc);
@@ -16452,7 +16486,7 @@ pub fn op_alter_column(
                     let trigger = Arc::make_mut(trigger_arc);
                     rewrite_trigger_for_column_rename(
                         trigger,
-                        &normalized_table_name,
+                        table_name.as_str(),
                         &old_column_name,
                         &new_name,
                     )?;
@@ -16463,7 +16497,7 @@ pub fn op_alter_column(
 
         for (view_db, view_name, rewritten) in view_rewrites {
             conn.with_database_schema_mut(view_db, move |schema| -> crate::Result<()> {
-                if let Some(view_arc) = schema.views.get_mut(&view_name) {
+                if let Some(view_arc) = schema.views.get_mut(crate::IdentKeyStr::new(&view_name)) {
                     let view = Arc::make_mut(view_arc);
                     view.sql = rewritten.sql;
                     view.select_stmt = rewritten.select_stmt;
@@ -16477,7 +16511,7 @@ pub fn op_alter_column(
             conn.with_schema(*db, |schema| -> crate::Result<()> {
                 let table = schema
                     .tables
-                    .get(&normalized_table_name)
+                    .get(crate::IdentKeyStr::new(table_name.as_str()))
                     .expect("table being ALTERed should be in schema");
                 let _column = table
                     .get_column_at(*column_index)

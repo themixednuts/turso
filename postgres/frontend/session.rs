@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use crate::aliases;
 use crate::catalog::{self, PostgresDialect};
 use turso_core::{Connection, LimboError, PrepareOptions, Result, Statement, Value};
-use turso_parser::ast::{self};
+use turso_parser::{ast, IdentKey};
 use turso_pg_parser::translator::{
     is_comment_on, is_refresh_matview, try_extract_copy_from, try_extract_create_schema,
     try_extract_drop_schema, try_extract_set, try_extract_show, PgCopyFromStmt, PgCreateSchemaStmt,
@@ -319,7 +319,7 @@ fn handle_pg_set(pg_conn: &Arc<PgConnectionInner>, set_stmt: &PgSetStmt) -> Resu
 }
 
 fn handle_pg_create_schema(conn: &Arc<Connection>, stmt: &PgCreateSchemaStmt) -> Result<()> {
-    let name = stmt.name.to_lowercase();
+    let name = IdentKey::from_unquoted(&stmt.name);
     if name == "public" {
         if stmt.if_not_exists {
             return Ok(());
@@ -329,7 +329,7 @@ fn handle_pg_create_schema(conn: &Arc<Connection>, stmt: &PgCreateSchemaStmt) ->
         )));
     }
 
-    if schema_exists(conn, &name)? {
+    if schema_exists(conn, name.as_str())? {
         if stmt.if_not_exists {
             return Ok(());
         }
@@ -338,17 +338,18 @@ fn handle_pg_create_schema(conn: &Arc<Connection>, stmt: &PgCreateSchemaStmt) ->
         )));
     }
 
-    let path = schema_file_path(conn, &name);
+    let path = schema_file_path(conn, name.as_str());
+    let quoted_name = turso_pg_parser::quote_identifier(name.as_str());
     execute_sqlite_internal(
         conn,
-        format!("ATTACH '{}' AS \"{}\"", path.replace('\'', "''"), name),
+        format!("ATTACH '{}' AS {quoted_name}", path.replace('\'', "''")),
     )?;
     Ok(())
 }
 
 fn schema_file_path(conn: &Connection, schema_name: &str) -> String {
     let main_path = conn.db_file_path();
-    let filename = format!("turso-postgres-schema-{schema_name}.db");
+    let filename = crate::postgres_schema_file_name(schema_name);
     if main_path == ":memory:" {
         filename
     } else {
@@ -360,12 +361,12 @@ fn schema_file_path(conn: &Connection, schema_name: &str) -> String {
 }
 
 fn handle_pg_drop_schema(conn: &Arc<Connection>, stmt: &PgDropSchemaStmt) -> Result<()> {
-    let name = stmt.name.to_lowercase();
+    let name = IdentKey::from_unquoted(&stmt.name);
     if name == "public" {
         return handle_pg_drop_schema_public(conn, stmt.cascade);
     }
 
-    if !schema_exists(conn, &name)? {
+    if !schema_exists(conn, name.as_str())? {
         if stmt.if_exists {
             return Ok(());
         }
@@ -375,10 +376,11 @@ fn handle_pg_drop_schema(conn: &Arc<Connection>, stmt: &PgDropSchemaStmt) -> Res
     }
 
     if stmt.cascade {
-        drop_all_tables_in_schema(conn, &name)?;
+        drop_all_tables_in_schema(conn, name.as_str())?;
     }
 
-    execute_sqlite_internal(conn, format!("DETACH \"{name}\""))?;
+    let quoted_name = turso_pg_parser::quote_identifier(name.as_str());
+    execute_sqlite_internal(conn, format!("DETACH {quoted_name}"))?;
     Ok(())
 }
 
@@ -391,15 +393,19 @@ fn handle_pg_drop_schema_public(conn: &Arc<Connection>, cascade: bool) -> Result
     }
 
     for table_name in table_names {
-        let mut stmt = conn.prepare(format!("DROP TABLE \"{table_name}\""))?;
+        let table_name = turso_pg_parser::quote_identifier(&table_name);
+        let mut stmt = conn.prepare(format!("DROP TABLE {table_name}"))?;
         stmt.run_ignore_rows()?;
     }
     Ok(())
 }
 
 fn drop_all_tables_in_schema(conn: &Arc<Connection>, schema_name: &str) -> Result<()> {
-    for table_name in list_user_tables(conn, Some(schema_name))? {
-        let mut stmt = conn.prepare(format!("DROP TABLE \"{schema_name}\".\"{table_name}\"",))?;
+    let table_names = list_user_tables(conn, Some(schema_name))?;
+    let schema_name = turso_pg_parser::quote_identifier(schema_name);
+    for table_name in table_names {
+        let table_name = turso_pg_parser::quote_identifier(&table_name);
+        let mut stmt = conn.prepare(format!("DROP TABLE {schema_name}.{table_name}"))?;
         stmt.run_ignore_rows()?;
     }
     Ok(())
@@ -505,7 +511,10 @@ fn get_table_columns(
 fn list_user_tables(conn: &Arc<Connection>, schema_name: Option<&str>) -> Result<Vec<String>> {
     let filter = "type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '__turso_internal_%'";
     let sql = match schema_name {
-        Some(name) => format!("SELECT name FROM \"{name}\".sqlite_schema WHERE {filter}"),
+        Some(name) => {
+            let name = turso_pg_parser::quote_identifier(name);
+            format!("SELECT name FROM {name}.sqlite_schema WHERE {filter}")
+        }
         None => format!("SELECT name FROM sqlite_schema WHERE {filter}"),
     };
     let mut stmt = conn.prepare_internal(&sql)?;

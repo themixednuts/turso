@@ -182,7 +182,10 @@ fn translate_integrity_check_impl(
             }
             root_pages.push(table_root);
             live_root_pages.insert(table_root);
-            if let Some(indexes) = schema.indexes.get(btree_table.name.as_str()) {
+            if let Some(indexes) = schema
+                .indexes
+                .get(crate::IdentKeyStr::new(btree_table.name.as_str()))
+            {
                 for index in indexes {
                     let index_root = resolve_root(index.root_page);
                     if index_root > 0 {
@@ -287,7 +290,10 @@ fn translate_integrity_check_impl(
         );
 
         let mut bound_indexes = Vec::new();
-        if let Some(indexes) = schema.indexes.get(btree_table.name.as_str()) {
+        if let Some(indexes) = schema
+            .indexes
+            .get(crate::IdentKeyStr::new(btree_table.name.as_str()))
+        {
             for index in indexes {
                 if index.root_page <= 0 {
                     continue;

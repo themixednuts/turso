@@ -105,7 +105,7 @@ impl MaterializedViewCursor {
         // Process the deltas through the circuit to get materialized changes
         let mut uncommitted = DeltaSet::new();
         for (table_name, delta) in table_deltas {
-            uncommitted.insert(table_name, delta);
+            uncommitted.insert_key(table_name, delta);
         }
 
         let processed_delta = return_if_io!(view_guard.execute_with_uncommitted(

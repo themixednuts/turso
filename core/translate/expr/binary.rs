@@ -807,31 +807,32 @@ pub(crate) fn expr_is_array(expr: &Expr, referenced_tables: Option<&TableReferen
                 }
             }
             // Wrapper functions that pass through an array value
-            match name.as_str().to_lowercase().as_str() {
-                "coalesce" | "ifnull" | "min" | "max" => {
-                    args.iter().any(|a| expr_is_array(a, referenced_tables))
-                }
-                "iif" => {
-                    // args: condition, then_val, else_val
-                    args.get(1)
+            let name = name.as_key_str();
+            if ["coalesce", "ifnull", "min", "max"]
+                .iter()
+                .any(|candidate| name == candidate)
+            {
+                args.iter().any(|a| expr_is_array(a, referenced_tables))
+            } else if name == "iif" {
+                // args: condition, then_val, else_val
+                args.get(1)
+                    .is_some_and(|a| expr_is_array(a, referenced_tables))
+                    || args
+                        .get(2)
                         .is_some_and(|a| expr_is_array(a, referenced_tables))
-                        || args
-                            .get(2)
-                            .is_some_and(|a| expr_is_array(a, referenced_tables))
+            } else if name == "nullif" {
+                args.first()
+                    .is_some_and(|a| expr_is_array(a, referenced_tables))
+            } else if name == "array_element" {
+                // Subscripting a multi-dim array yields a lower-dim array
+                if let Some(tables) = referenced_tables {
+                    args.first()
+                        .is_some_and(|a| expr_array_dimensions(a, tables) > 1)
+                } else {
+                    false
                 }
-                "nullif" => args
-                    .first()
-                    .is_some_and(|a| expr_is_array(a, referenced_tables)),
-                "array_element" => {
-                    // Subscripting a multi-dim array yields a lower-dim array
-                    if let Some(tables) = referenced_tables {
-                        args.first()
-                            .is_some_and(|a| expr_array_dimensions(a, tables) > 1)
-                    } else {
-                        false
-                    }
-                }
-                _ => false,
+            } else {
+                false
             }
         }
         Expr::Array { .. } | Expr::Subscript { .. } => {

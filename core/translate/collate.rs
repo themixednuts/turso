@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     cmp::Ordering,
     collections::HashMap,
     hash::{Hash, Hasher},
@@ -39,7 +40,7 @@ struct CustomCollationNames {
     // Custom collation callbacks are connection-local. This process-wide table
     // only interns names so bytecode can carry compact `CollationSeq::Custom`
     // tokens and resolve the callback through the active connection at runtime.
-    by_name: HashMap<String, u32>,
+    by_name: HashMap<crate::IdentKey, u32>,
     by_id: HashMap<u32, String>,
 }
 
@@ -48,10 +49,10 @@ static CUSTOM_COLLATION_NAMES: LazyLock<Mutex<CustomCollationNames>> =
 
 impl CollationSeq {
     pub fn new(collation: &str) -> crate::Result<Self> {
-        match crate::util::normalize_ident(collation).as_str() {
-            "binary" => return Ok(Self::Binary),
-            "nocase" => return Ok(Self::NoCase),
-            "rtrim" => return Ok(Self::Rtrim),
+        match crate::IdentKeyStr::new(collation) {
+            name if name == "binary" => return Ok(Self::Binary),
+            name if name == "nocase" => return Ok(Self::NoCase),
+            name if name == "rtrim" => return Ok(Self::Rtrim),
             _ => {}
         }
 
@@ -107,28 +108,38 @@ impl CollationSeq {
     }
 
     pub fn custom(collation: &str) -> Self {
-        let normalized = crate::util::normalize_ident(collation);
+        Self::register_custom(Cow::Borrowed(collation))
+    }
+
+    pub(crate) fn custom_owned(collation: String) -> Self {
+        Self::register_custom(Cow::Owned(collation))
+    }
+
+    fn register_custom(collation: Cow<'_, str>) -> Self {
         let mut registry = CUSTOM_COLLATION_NAMES.lock();
-        if let Some(id) = registry.by_name.get(&normalized) {
+        if let Some(id) = registry
+            .by_name
+            .get(crate::IdentKeyStr::new(collation.as_ref()))
+        {
             return Self::Custom(*id);
         }
 
+        let normalized = crate::IdentKey::from_unquoted(collation.as_ref());
         let mut id = custom_collation_id(&normalized);
         while id <= 3 || registry.by_id.contains_key(&id) {
             id = id.wrapping_add(1).max(4);
         }
 
         registry.by_name.insert(normalized, id);
-        registry.by_id.insert(id, collation.to_string());
+        registry.by_id.insert(id, collation.into_owned());
         Self::Custom(id)
     }
 
     pub(crate) fn known_custom(collation: &str) -> Option<Self> {
-        let normalized = crate::util::normalize_ident(collation);
         CUSTOM_COLLATION_NAMES
             .lock()
             .by_name
-            .get(&normalized)
+            .get(crate::IdentKeyStr::new(collation))
             .copied()
             .map(Self::Custom)
     }
@@ -532,6 +543,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn custom_collation_names_use_identifier_case_rules() {
+        let lower = CollationSeq::custom("long_custom_collation_name");
+        let upper = CollationSeq::custom("LONG_CUSTOM_COLLATION_NAME");
+
+        assert_eq!(lower, upper);
+        assert_eq!(
+            CollationSeq::known_custom("LoNg_CuStOm_CoLlAtIoN_NaMe"),
+            Some(lower)
+        );
+    }
+
+    #[test]
     fn test_locale_collation_names() {
         assert!(matches!(
             CollationSeq::new("fr-FR").unwrap(),
@@ -604,7 +627,7 @@ mod tests {
                     column: 0,
                     is_rowid_alias: false,
                 }),
-                Name::exact(collation.to_string()),
+                Name::exact_ref(collation),
             );
             let collseq = get_collseq_from_expr(&expr, &table_references).unwrap();
             assert_eq!(collseq, Some(expected_collation));
@@ -624,11 +647,11 @@ mod tests {
                 column: 0,
                 is_rowid_alias: false,
             }),
-            Name::exact("NOCASE".to_string()),
+            Name::exact_ref("NOCASE"),
         );
         let expr = Expr::Collate(
             Box::new(Expr::Parenthesized(std::vec![Box::new(inner)])),
-            Name::exact("RTRIM".to_string()),
+            Name::exact_ref("RTRIM"),
         );
         let collseq = get_collseq_from_expr(&expr, &table_references).unwrap();
         assert_eq!(collseq, Some(CollationSeq::Rtrim));
@@ -686,7 +709,7 @@ mod tests {
         };
         let rhs = Expr::Parenthesized(std::vec![Box::new(Expr::Collate(
             Box::new(Expr::Literal(Literal::String("x".to_string()))),
-            Name::exact("RTRIM".to_string()),
+            Name::exact_ref("RTRIM"),
         ))]);
         let expr = Expr::binary(lhs, Operator::Add, rhs);
         let collseq = get_collseq_from_expr(&expr, &table_references).unwrap();
@@ -723,11 +746,11 @@ mod tests {
         // (x COLLATE NOCASE) + (y COLLATE RTRIM) -- NOCASE wins since it's on the left side
         let lhs = Expr::Collate(
             Box::new(Expr::Literal(Literal::String("x".to_string()))),
-            Name::exact("NOCASE".to_string()),
+            Name::exact_ref("NOCASE"),
         );
         let rhs = Expr::Collate(
             Box::new(Expr::Literal(Literal::String("y".to_string()))),
-            Name::exact("RTRIM".to_string()),
+            Name::exact_ref("RTRIM"),
         );
         let expr = Expr::binary(lhs, Operator::Add, rhs);
         let collseq = get_collseq_from_expr(&expr, &table_references).unwrap();
@@ -805,7 +828,7 @@ mod tests {
                 column: 0,
                 is_rowid_alias: false,
             }),
-            Name::exact("RTRIM".to_string()),
+            Name::exact_ref("RTRIM"),
         );
         assert_eq!(
             resolve_comparison_collseq(&lhs, &rhs, &table_refs).unwrap(),

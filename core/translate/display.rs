@@ -852,7 +852,7 @@ impl ToTokens for SelectPlan {
         if let Some(window) = &self.window {
             if let Some(window_name) = &window.name {
                 s.append(TokenType::TK_WINDOW, None)?;
-                s.append(TokenType::TK_ID, Some(window_name))?;
+                s.append(TokenType::TK_ID, Some(window_name.as_str()))?;
                 s.append(TokenType::TK_AS, None)?;
 
                 s.append(TokenType::TK_LP, None)?;
@@ -978,7 +978,7 @@ impl ToTokens for UpdatePlan {
                     .unwrap();
 
                 ast::Set {
-                    col_names: vec![ast::Name::exact(col_name.clone())],
+                    col_names: vec![ast::Name::exact_ref(col_name)],
                     expr: set_clause.expr.clone(),
                 }
             }),

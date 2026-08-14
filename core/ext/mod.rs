@@ -18,6 +18,7 @@ use crate::WindowsIOCP;
 
 use crate::{function::ExternalFunc, Connection, Database};
 use crate::{vtab::VirtualTable, SymbolTable};
+use crate::{IdentKey, IdentKeyStr};
 #[cfg(feature = "fs")]
 use crate::{LimboError, IO};
 #[cfg(feature = "fs")]
@@ -55,8 +56,8 @@ pub(crate) unsafe extern "C" fn register_vtab_module(
     }
 
     let c_str = unsafe { CString::from_raw(name as *mut c_char) };
-    let name_str = match c_str.to_str() {
-        Ok(s) => s.to_string(),
+    let name = match c_str.to_str() {
+        Ok(s) => IdentKey::from_unquoted(s),
         Err(_) => return ResultCode::Error,
     };
 
@@ -69,20 +70,20 @@ pub(crate) unsafe extern "C" fn register_vtab_module(
 
     unsafe {
         let syms = &mut *ext_ctx.syms;
-        syms.vtab_modules.insert(name_str.clone(), vmodule.into());
+        syms.vtab_modules.insert(name.clone(), vmodule.into());
         if !ext_ctx.prepare_context_generation.is_null() {
             (*ext_ctx.prepare_context_generation).fetch_add(1, Ordering::Release);
         }
 
         if kind == VTabKind::TableValuedFunction {
-            if let Ok(vtab) = VirtualTable::function(&name_str, syms) {
+            if let Ok(vtab) = VirtualTable::function(name.as_str(), syms) {
                 let table = Arc::new(Table::Virtual(vtab));
                 let mutex = &*(ext_ctx.schema as *mut Mutex<Arc<Schema>>);
                 let mut guard = mutex.lock();
                 let Ok(schema) = Schema::try_make_mut(&mut guard) else {
                     return ResultCode::Error;
                 };
-                schema.tables.insert(name_str, table);
+                schema.tables.insert(name, table);
             } else {
                 return ResultCode::Error;
             }
@@ -119,16 +120,16 @@ pub(crate) unsafe extern "C" fn register_scalar_function_with_options(
         return ResultCode::InvalidArgs;
     }
     let c_str = unsafe { CStr::from_ptr(name) };
-    let name_str = match c_str.to_str() {
-        Ok(s) => crate::util::normalize_ident(s),
+    let name = match c_str.to_str() {
+        Ok(s) => IdentKey::from_unquoted(s),
         Err(_) => return ResultCode::InvalidArgs,
     };
     let ext_ctx = unsafe { &mut *(ctx as *mut ExtensionCtx) };
     unsafe {
         (*ext_ctx.syms).functions.insert(
-            name_str.clone(),
+            name.clone(),
             Arc::new(ExternalFunc::new_scalar(
-                name_str,
+                name.to_string(),
                 argc,
                 deterministic,
                 context,
@@ -152,13 +153,17 @@ pub(crate) unsafe extern "C" fn unregister_function(
         return ResultCode::InvalidArgs;
     }
     let c_str = unsafe { CStr::from_ptr(name) };
-    let name_str = match c_str.to_str() {
-        Ok(s) => crate::util::normalize_ident(s),
+    let name = match c_str.to_str() {
+        Ok(s) => s,
         Err(_) => return ResultCode::InvalidArgs,
     };
     let ext_ctx = unsafe { &mut *(ctx as *mut ExtensionCtx) };
     unsafe {
-        if (*ext_ctx.syms).functions.remove(&name_str).is_none() {
+        if (*ext_ctx.syms)
+            .functions
+            .remove(IdentKeyStr::new(name))
+            .is_none()
+        {
             return ResultCode::NotFound;
         }
         if !ext_ctx.prepare_context_generation.is_null() {
@@ -184,16 +189,16 @@ pub(crate) unsafe extern "C" fn register_aggregate_function(
         return ResultCode::InvalidArgs;
     }
     let c_str = unsafe { CStr::from_ptr(name) };
-    let name_str = match c_str.to_str() {
-        Ok(s) => crate::util::normalize_ident(s),
+    let name = match c_str.to_str() {
+        Ok(s) => IdentKey::from_unquoted(s),
         Err(_) => return ResultCode::InvalidArgs,
     };
     let ext_ctx = unsafe { &mut *(ctx as *mut ExtensionCtx) };
     unsafe {
         (*ext_ctx.syms).functions.insert(
-            name_str.clone(),
+            name.clone(),
             Arc::new(ExternalFunc::new_aggregate(
-                name_str,
+                name.to_string(),
                 args,
                 context,
                 (init_func, step_func, finalize_func),
@@ -247,16 +252,18 @@ impl Database {
         {
             let mut syms = self.builtin_syms.write();
             syms.index_methods.insert(
-                TOY_VECTOR_SPARSE_IVF_INDEX_METHOD_NAME.to_string(),
+                IdentKey::from_unquoted(TOY_VECTOR_SPARSE_IVF_INDEX_METHOD_NAME),
                 Arc::new(VectorSparseInvertedIndexMethod),
             );
             syms.index_methods.insert(
-                BACKING_BTREE_INDEX_METHOD_NAME.to_string(),
+                IdentKey::from_unquoted(BACKING_BTREE_INDEX_METHOD_NAME),
                 Arc::new(BackingBtreeIndexMethod),
             );
             #[cfg(all(feature = "fts", not(target_family = "wasm")))]
-            syms.index_methods
-                .insert(FTS_INDEX_METHOD_NAME.to_string(), Arc::new(FtsIndexMethod));
+            syms.index_methods.insert(
+                IdentKey::from_unquoted(FTS_INDEX_METHOD_NAME),
+                Arc::new(FtsIndexMethod),
+            );
         }
         let syms = self.builtin_syms.data_ptr();
         // Pass the mutex pointer and the appropriate handler

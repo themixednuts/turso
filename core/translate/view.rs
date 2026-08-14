@@ -8,9 +8,7 @@ use crate::translate::{
     emitter::Resolver,
     schema::{emit_schema_entry, SchemaEntryType, SQLITE_TABLEID},
 };
-use crate::util::{
-    escape_sql_string_literal, normalize_ident, PRIMARY_KEY_AUTOMATIC_INDEX_NAME_PREFIX,
-};
+use crate::util::{escape_sql_string_literal, PRIMARY_KEY_AUTOMATIC_INDEX_NAME_PREFIX};
 use crate::vdbe::builder::{CursorType, ProgramBuilder};
 use crate::vdbe::insn::{CmpInsFlags, Cookie, Insn, RegisterOrLiteral};
 use crate::{bail_parse_error, Connection, Result, MAIN_DB_ID};
@@ -45,7 +43,8 @@ fn validate_materialized(
     // which must be dropped before the name can be reused)
     if resolver.with_schema(database_id, |s| {
         s.get_materialized_view(normalized_view_name).is_some()
-            || s.broken_views.contains(normalized_view_name)
+            || s.broken_views
+                .contains(crate::IdentKeyStr::new(normalized_view_name))
     }) {
         return Err(crate::LimboError::ParseError(format!(
             "View {normalized_view_name} already exists"
@@ -65,17 +64,18 @@ pub fn translate_create_materialized_view(
     let database_id = resolver.resolve_database_id(view_name)?;
     let schema_cookie = resolver.with_schema(database_id, |s| s.schema_version);
     program.begin_write_on_database(database_id, schema_cookie)?;
-    let normalized_view_name = normalize_ident(view_name.name.as_str());
 
     if if_not_exists
         && resolver.with_schema(database_id, |s| {
-            s.get_view(&normalized_view_name).is_some()
-                || s.is_materialized_view(&normalized_view_name)
-                || s.broken_views.contains(&normalized_view_name)
+            s.get_view(view_name.name.as_str()).is_some()
+                || s.is_materialized_view(view_name.name.as_str())
+                || s.broken_views.contains(view_name.name.as_key_str())
         })
     {
         return Ok(());
     }
+
+    let normalized_view_name = view_name.name.to_key();
 
     // Validate the view can be created and extract its columns
     // This validation happens before updating sqlite_master to prevent
@@ -89,6 +89,8 @@ pub fn translate_create_materialized_view(
         IncrementalView::validate_and_extract_columns(select_stmt, s)
     })?;
     let view_columns = view_column_schema.flat_columns();
+
+    let normalized_view_name = String::from(normalized_view_name);
 
     // Reconstruct the SQL string for storage
     let sql = create_materialized_view_to_str(&view_name.name.as_ident(), select_stmt);
@@ -292,7 +294,8 @@ fn validate_create_view(
     if resolver.with_schema(database_id, |s| {
         s.get_view(normalized_view_name).is_some()
             || s.is_materialized_view(normalized_view_name)
-            || s.broken_views.contains(normalized_view_name)
+            || s.broken_views
+                .contains(crate::IdentKeyStr::new(normalized_view_name))
     }) {
         return Err(crate::LimboError::ParseError(format!(
             "view {} already exists",
@@ -326,17 +329,18 @@ pub fn translate_create_view(
     };
     let schema_cookie = resolver.with_schema(database_id, |s| s.schema_version);
     program.begin_write_on_database(database_id, schema_cookie)?;
-    let normalized_view_name = normalize_ident(view_name.name.as_str());
 
     if if_not_exists
         && resolver.with_schema(database_id, |s| {
-            s.get_view(&normalized_view_name).is_some()
-                || s.is_materialized_view(&normalized_view_name)
-                || s.broken_views.contains(&normalized_view_name)
+            s.get_view(view_name.name.as_str()).is_some()
+                || s.is_materialized_view(view_name.name.as_str())
+                || s.broken_views.contains(view_name.name.as_key_str())
         })
     {
         return Ok(());
     }
+
+    let normalized_view_name = view_name.name.to_key();
 
     validate_create_view(
         resolver,
@@ -445,7 +449,6 @@ pub fn translate_drop_view(
     let database_id = resolver.resolve_existing_table_database_id_qualified(view_name)?;
     let schema_cookie = resolver.with_schema(database_id, |s| s.schema_version);
     program.begin_write_on_database(database_id, schema_cookie)?;
-    let normalized_view_name = normalize_ident(view_name.name.as_str());
 
     // Check if view exists: regular, materialized, or a broken sqlite_schema
     // row whose stored SQL failed to parse at load time. Broken views have no
@@ -454,14 +457,15 @@ pub fn translate_drop_view(
     let (is_regular_view, is_materialized_view, is_broken_view) =
         resolver.with_schema(database_id, |s| {
             (
-                s.get_view(&normalized_view_name).is_some(),
-                s.is_materialized_view(&normalized_view_name),
-                s.broken_views.contains(&normalized_view_name),
+                s.get_view(view_name.name.as_str()).is_some(),
+                s.is_materialized_view(view_name.name.as_str()),
+                s.broken_views.contains(view_name.name.as_key_str()),
             )
         });
     let view_exists = is_regular_view || is_materialized_view || is_broken_view;
 
     if !view_exists && !if_exists {
+        let normalized_view_name = view_name.name.to_key();
         return Err(crate::LimboError::ParseError(format!(
             "no such view: {normalized_view_name}"
         )));
@@ -471,6 +475,8 @@ pub fn translate_drop_view(
         // View doesn't exist but IF EXISTS was specified, nothing to do
         return Ok(());
     }
+
+    let normalized_view_name = String::from(view_name.name.to_key());
 
     // If this is a materialized view, we need to destroy its btree as well
     // and also clean up the associated DBSP state table and index

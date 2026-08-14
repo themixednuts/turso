@@ -15,10 +15,10 @@ use crate::translate::expr::{
 use crate::translate::index::{resolve_index_method_parameters, resolve_sorted_columns};
 use crate::translate::planner::ROWID_STRS;
 use crate::types::{IOResult, ImmutableRecord};
-use crate::util::{exprs_are_equivalent, normalize_ident};
+use crate::util::exprs_are_equivalent;
 use crate::vdbe::affinity::Affinity;
 use crate::vdbe::CursorID;
-use crate::{turso_assert, turso_debug_assert};
+use crate::{turso_assert, turso_debug_assert, IdentKey, IdentKeyStr};
 use smallvec::SmallVec;
 use turso_macros::AtomicEnum;
 
@@ -86,14 +86,14 @@ impl Clone for View {
 }
 
 /// Type alias for regular views collection
-pub type ViewsMap = HashMap<String, Arc<View>>;
+pub type ViewsMap = HashMap<IdentKey, Arc<View>>;
 
 /// Trigger structure
 #[derive(Debug, Clone)]
 pub struct Trigger {
     pub name: String,
     pub sql: String,
-    pub table_name: String,
+    pub table_name: turso_parser::ast::Name,
     pub time: turso_parser::ast::TriggerTime,
     pub event: turso_parser::ast::TriggerEvent,
     pub for_each_row: bool,
@@ -119,7 +119,7 @@ impl Trigger {
     pub fn new(
         name: String,
         sql: String,
-        table_name: String,
+        table_name: turso_parser::ast::Name,
         time: Option<turso_parser::ast::TriggerTime>,
         event: turso_parser::ast::TriggerEvent,
         for_each_row: bool,
@@ -212,7 +212,7 @@ pub fn rewrite_value_to_column(expr: &ast::Expr, col_name: &str) -> Box<ast::Exp
     let _ = walk_expr_mut(&mut cloned, &mut |e| {
         if let ast::Expr::Id(name) = e {
             if name.as_str().eq_ignore_ascii_case("value") {
-                *e = ast::Expr::Id(ast::Name::exact(col_name.to_string()));
+                *e = ast::Expr::Id(ast::Name::exact_ref(col_name));
             }
         }
         Ok(WalkControl::Continue)
@@ -556,13 +556,13 @@ impl TypeDef {
 /// Accumulators for schema loading - kept separate to avoid moving through state variants
 struct MakeFromBtreeAccumulators {
     from_sql_indexes: Vec<UnparsedFromSqlIndex>,
-    automatic_indices: HashMap<String, Vec<(String, i64)>>,
+    automatic_indices: HashMap<IdentKey, Vec<(String, i64)>>,
     /// Store DBSP state table root pages: view_name -> dbsp_state_root_page
-    dbsp_state_roots: HashMap<String, i64>,
+    dbsp_state_roots: HashMap<IdentKey, i64>,
     /// Store DBSP state table index root pages: view_name -> dbsp_state_index_root_page
-    dbsp_state_index_roots: HashMap<String, i64>,
+    dbsp_state_index_roots: HashMap<IdentKey, i64>,
     /// Store materialized view info (SQL and root page) for later creation
-    materialized_view_info: HashMap<String, (String, i64)>,
+    materialized_view_info: HashMap<IdentKey, (String, i64)>,
 }
 
 /// Phase tracking for async schema loading
@@ -641,9 +641,11 @@ pub const RESERVED_TABLE_PREFIXES: [&str; 2] = ["sqlite_", "__turso_internal_"];
 
 /// Check if a table name refers to a system table that should be protected from direct writes
 pub fn is_system_table(table_name: &str) -> bool {
-    RESERVED_TABLE_PREFIXES
-        .iter()
-        .any(|prefix| table_name.to_lowercase().starts_with(prefix))
+    RESERVED_TABLE_PREFIXES.iter().any(|prefix| {
+        table_name
+            .get(..prefix.len())
+            .is_some_and(|start| IdentKeyStr::new(start) == prefix)
+    })
 }
 
 pub fn allow_user_dml(table_name: &str) -> bool {
@@ -757,40 +759,40 @@ pub enum SchemaObjectType {
 
 #[derive(Debug)]
 pub struct Schema {
-    pub tables: HashMap<String, Arc<Table>>,
+    pub tables: HashMap<IdentKey, Arc<Table>>,
     #[cfg(feature = "conn_raw_api")]
-    pub(crate) table_names_by_root_page: HashMap<i64, String>,
+    pub(crate) table_names_by_root_page: HashMap<i64, IdentKey>,
 
     /// Track which tables are actually materialized views
-    pub materialized_view_names: HashSet<String>,
+    pub materialized_view_names: HashSet<IdentKey>,
     /// Store original SQL for materialized views (for .schema command)
-    pub materialized_view_sql: HashMap<String, String>,
+    pub materialized_view_sql: HashMap<IdentKey, String>,
     /// The incremental view objects (DBSP circuits)
-    pub incremental_views: HashMap<String, Arc<Mutex<IncrementalView>>>,
+    pub incremental_views: HashMap<IdentKey, Arc<Mutex<IncrementalView>>>,
 
     pub views: ViewsMap,
 
     /// table_name to list of triggers
-    pub triggers: HashMap<String, VecDeque<Arc<Trigger>>>,
+    pub triggers: HashMap<IdentKey, VecDeque<Arc<Trigger>>>,
 
     /// table_name to list of indexes for the table
-    pub indexes: HashMap<String, VecDeque<Arc<Index>>>,
-    pub has_indexes: HashSet<String>,
+    pub indexes: HashMap<IdentKey, VecDeque<Arc<Index>>>,
+    pub has_indexes: HashSet<IdentKey>,
     pub schema_version: u32,
     /// Statistics collected via ANALYZE for regular B-tree tables and indexes.
     pub analyze_stats: AnalyzeStats,
 
     /// Mapping from table names to the materialized views that depend on them
-    pub table_to_materialized_views: HashMap<String, Vec<String>>,
+    pub table_to_materialized_views: HashMap<IdentKey, Vec<IdentKey>>,
 
     /// Track views that exist but have incompatible versions
-    pub incompatible_views: HashSet<String>,
+    pub incompatible_views: HashSet<IdentKey>,
 
     /// View rows in sqlite_schema whose stored SQL failed to parse (e.g.
     /// older versions wrote view column lists without identifier quoting).
     /// The rows are tolerated at load time so the database stays usable;
     /// tracking the names lets DROP VIEW remove them.
-    pub broken_views: HashSet<String>,
+    pub broken_views: HashSet<IdentKey>,
 
     /// Root pages of tables/indexes that have been dropped but not yet checkpointed.
     /// In MVCC mode, when a table is dropped, the btree pages are not freed until checkpoint.
@@ -798,11 +800,11 @@ pub struct Schema {
     pub dropped_root_pages: HashSet<i64>,
 
     /// Custom type registry, loaded from sqlite_turso_types
-    pub type_registry: HashMap<String, Arc<TypeDef>>,
+    pub type_registry: HashMap<IdentKey, Arc<TypeDef>>,
 
     pub generated_columns_enabled: bool,
     /// Named sequences (CREATE SEQUENCE)
-    pub sequences: HashMap<String, Arc<Sequence>>,
+    pub sequences: HashMap<IdentKey, Arc<Sequence>>,
 }
 
 impl Default for Schema {
@@ -811,7 +813,7 @@ impl Default for Schema {
     }
 }
 
-fn bootstrap_builtin_types(registry: &mut HashMap<String, Arc<TypeDef>>) -> crate::Result<()> {
+fn bootstrap_builtin_types(registry: &mut HashMap<IdentKey, Arc<TypeDef>>) -> crate::Result<()> {
     use turso_parser::ast::{Cmd, Stmt};
     use turso_parser::parser::Parser;
 
@@ -858,7 +860,10 @@ fn bootstrap_builtin_types(registry: &mut HashMap<String, Arc<TypeDef>>) -> crat
         };
 
         let type_def = TypeDef::from_create_type(&type_name, &body, true, sql.to_string())?;
-        registry.insert(type_name.to_lowercase(), Arc::new(type_def));
+        registry.insert(
+            IdentKey::from_unquoted(type_name.as_str()),
+            Arc::new(type_def),
+        );
     }
 
     // Register aliases
@@ -868,21 +873,20 @@ fn bootstrap_builtin_types(registry: &mut HashMap<String, Arc<TypeDef>>) -> crat
         ("int8", "bigint"),
     ];
     for (alias, target) in aliases {
-        if let Some(type_def) = registry.get(*target).cloned() {
-            registry.insert(alias.to_string(), type_def);
+        if let Some(type_def) = registry.get(IdentKeyStr::new(target)).cloned() {
+            registry.insert(IdentKey::from_unquoted(alias), type_def);
         }
     }
     Ok(())
 }
 
 impl Schema {
-    fn normalize_table_lookup_name(&self, name: &str) -> String {
-        let name = normalize_ident(name);
-        if name.eq(SCHEMA_TABLE_NAME_ALT)
-            || name.eq(TEMP_SCHEMA_TABLE_NAME)
-            || name.eq(TEMP_SCHEMA_TABLE_NAME_ALT)
+    fn table_lookup_name(name: &str) -> &str {
+        if name.eq_ignore_ascii_case(SCHEMA_TABLE_NAME_ALT)
+            || name.eq_ignore_ascii_case(TEMP_SCHEMA_TABLE_NAME)
+            || name.eq_ignore_ascii_case(TEMP_SCHEMA_TABLE_NAME_ALT)
         {
-            SCHEMA_TABLE_NAME.to_string()
+            SCHEMA_TABLE_NAME
         } else {
             name
         }
@@ -902,24 +906,24 @@ impl Schema {
         enable_custom_types: bool,
         dialect: &dyn crate::dialect::Dialect,
     ) -> crate::Result<Self> {
-        let mut tables: HashMap<String, Arc<Table>> = HashMap::default();
+        let mut tables: HashMap<IdentKey, Arc<Table>> = HashMap::default();
         #[cfg(feature = "conn_raw_api")]
         let mut table_names_by_root_page = HashMap::default();
         let has_indexes = HashSet::default();
-        let indexes: HashMap<String, VecDeque<Arc<Index>>> = HashMap::default();
+        let indexes: HashMap<IdentKey, VecDeque<Arc<Index>>> = HashMap::default();
         #[allow(clippy::arc_with_non_send_sync)]
         tables.insert(
-            SCHEMA_TABLE_NAME.to_string(),
+            IdentKey::from_unquoted(SCHEMA_TABLE_NAME),
             Arc::new(Table::BTree(sqlite_schema_table()?.into())),
         );
         #[cfg(feature = "conn_raw_api")]
-        table_names_by_root_page.insert(1, SCHEMA_TABLE_NAME.to_string());
+        table_names_by_root_page.insert(1, IdentKey::from_unquoted(SCHEMA_TABLE_NAME));
         let materialized_view_names = HashSet::default();
         let materialized_view_sql = HashMap::default();
         let incremental_views = HashMap::default();
         let views: ViewsMap = HashMap::default();
         let triggers = HashMap::default();
-        let table_to_materialized_views: HashMap<String, Vec<String>> = HashMap::default();
+        let table_to_materialized_views: HashMap<IdentKey, Vec<IdentKey>> = HashMap::default();
         let incompatible_views = HashSet::default();
         let mut type_registry = HashMap::default();
         if enable_custom_types {
@@ -963,9 +967,8 @@ impl Schema {
     {
         let vtab = crate::vtab::VirtualTable::wrap_internal_table(table)?;
         let name = vtab.name.clone();
-        let lookup_name = normalize_ident(&name);
         self.tables.insert(
-            lookup_name,
+            IdentKey::from_unquoted(&name),
             Arc::new(Table::Virtual(Arc::new((*vtab).clone()))),
         );
         Ok(name)
@@ -978,14 +981,14 @@ impl Schema {
         if !is_strict {
             return None;
         }
-        self.type_registry.get(&type_name.to_lowercase())
+        self.type_registry.get(IdentKeyStr::new(type_name))
     }
 
     /// Look up a custom type definition by name without a strictness check.
     /// Only use this for operations that aren't column-scoped (e.g. DROP TYPE,
     /// CREATE TABLE validation, CAST).
     pub fn get_type_def_unchecked(&self, type_name: &str) -> Option<&Arc<TypeDef>> {
-        self.type_registry.get(&type_name.to_lowercase())
+        self.type_registry.get(IdentKeyStr::new(type_name))
     }
 
     /// Resolve a custom type fully: look it up (with strictness gate) and chase
@@ -1005,8 +1008,7 @@ impl Schema {
     /// Resolve a custom type fully without a strictness check.
     /// Returns `Ok(None)` if the type is not in the registry.
     pub fn resolve_type_unchecked(&self, type_name: &str) -> crate::Result<Option<ResolvedType>> {
-        let key = type_name.to_lowercase();
-        if !self.type_registry.contains_key(&key) {
+        if !self.type_registry.contains_key(IdentKeyStr::new(type_name)) {
             return Ok(None);
         }
         let (primitive, chain) = self.resolve_base_type_chain(type_name)?;
@@ -1014,7 +1016,7 @@ impl Schema {
     }
 
     pub fn remove_type(&mut self, type_name: &str) {
-        self.type_registry.remove(&type_name.to_lowercase());
+        self.type_registry.remove(IdentKeyStr::new(type_name));
     }
 
     /// Chase the base type chain: domain_a → domain_b → integer
@@ -1027,7 +1029,7 @@ impl Schema {
     ) -> crate::Result<(String, Vec<Arc<TypeDef>>)> {
         let mut chain = vec![];
         let mut visited = std::collections::HashSet::new();
-        let mut current = type_name.to_lowercase();
+        let mut current: IdentKey = IdentKey::from_unquoted(type_name);
 
         loop {
             if !visited.insert(current.clone()) {
@@ -1038,11 +1040,11 @@ impl Schema {
             match self.type_registry.get(&current) {
                 Some(td) => {
                     chain.try_push(Arc::clone(td))?;
-                    current = td.base().to_lowercase();
+                    current = IdentKey::from_unquoted(td.base());
                 }
                 None => {
                     // current is not in the registry — it's a primitive
-                    return Ok((current, chain));
+                    return Ok((current.into(), chain));
                 }
             }
         }
@@ -1061,8 +1063,10 @@ impl Schema {
             }))) => {
                 let type_def =
                     TypeDef::from_create_type(&type_name, &body, false, sql.to_string())?;
-                self.type_registry
-                    .insert(type_name.to_lowercase(), Arc::new(type_def));
+                self.type_registry.insert(
+                    IdentKey::from_unquoted(type_name.as_str()),
+                    Arc::new(type_def),
+                );
             }
             Ok(Some(Cmd::Stmt(Stmt::CreateDomain {
                 domain_name,
@@ -1080,8 +1084,10 @@ impl Schema {
                     default,
                     sql.to_string(),
                 );
-                self.type_registry
-                    .insert(domain_name.to_lowercase(), Arc::new(type_def));
+                self.type_registry.insert(
+                    IdentKey::from_unquoted(domain_name.as_str()),
+                    Arc::new(type_def),
+                );
             }
             _ => {
                 return Err(crate::LimboError::ParseError(format!(
@@ -1107,7 +1113,7 @@ impl Schema {
     /// Call this after loading user-defined types from __turso_internal_types
     /// so that columns declared with custom types use the BASE type's affinity.
     pub fn resolve_all_custom_type_affinities(&mut self) -> Result<()> {
-        let mut tables: SmallVec<[(String, Arc<Table>); 8]> = SmallVec::with_capacity(8);
+        let mut tables: SmallVec<[(IdentKey, Arc<Table>); 8]> = SmallVec::with_capacity(8);
         for (name, table) in self.tables.iter().filter(|(_, t)| {
             t.is_strict()
                 && t.btree().is_some_and(|bt| {
@@ -1136,11 +1142,11 @@ impl Schema {
     }
 
     pub fn add_materialized_view(&mut self, view: IncrementalView, table: Arc<Table>, sql: String) {
-        let name = normalize_ident(view.name());
+        let name = IdentKey::from_unquoted(view.name());
 
         // Add to tables (so it appears as a regular table)
         #[cfg(feature = "conn_raw_api")]
-        self.register_table_root_page(&name, table.as_ref());
+        self.register_table_root_page(name.as_str(), table.as_ref());
         self.tables.insert(name.clone(), table);
 
         // Track that this is a materialized view
@@ -1153,50 +1159,51 @@ impl Schema {
     }
 
     pub fn get_materialized_view(&self, name: &str) -> Option<Arc<Mutex<IncrementalView>>> {
-        let name = normalize_ident(name);
-        self.incremental_views.get(&name).cloned()
+        self.incremental_views.get(IdentKeyStr::new(name)).cloned()
     }
 
     /// Check if DBSP state table exists with the current version
     pub fn has_compatible_dbsp_state_table(&self, view_name: &str) -> bool {
-        let view_name = normalize_ident(view_name);
         let expected_table_name = format!("{DBSP_TABLE_PREFIX}{DBSP_CIRCUIT_VERSION}_{view_name}");
 
         // Check if a table with the expected versioned name exists
-        self.tables.contains_key(&expected_table_name)
+        self.tables
+            .contains_key(IdentKeyStr::new(&expected_table_name))
     }
 
     pub fn is_materialized_view(&self, name: &str) -> bool {
-        let name = normalize_ident(name);
-        self.materialized_view_names.contains(&name)
+        self.materialized_view_names
+            .contains(IdentKeyStr::new(name))
     }
 
     /// Apply a function to a table's incompatible dependent materialized views
     pub fn with_incompatible_dependent_views<F, T>(&self, table_name: &str, f: F) -> T
     where
-        F: FnOnce(&[&String]) -> T,
+        F: FnOnce(&[&IdentKey]) -> T,
     {
-        let table_name = normalize_ident(table_name);
-        let mut views: SmallVec<[&String; 8]> = SmallVec::with_capacity(8);
+        let mut views: SmallVec<[&IdentKey; 8]> = SmallVec::with_capacity(8);
 
         // Get all materialized views that depend on this table
-        if let Some(v) = self.table_to_materialized_views.get(&table_name) {
+        if let Some(v) = self
+            .table_to_materialized_views
+            .get(IdentKeyStr::new(table_name))
+        {
             v.iter()
-                .filter(|name| self.incompatible_views.contains(&**name))
+                .filter(|name| self.incompatible_views.contains(*name))
                 .for_each(|n| views.push(n));
         }
         f(&views)
     }
 
     pub fn remove_view(&mut self, name: &str) -> Result<()> {
-        let name = normalize_ident(name);
-
-        if self.views.contains_key(&name) {
-            self.views.remove(&name);
+        if self.views.remove(IdentKeyStr::new(name)).is_some() {
             Ok(())
-        } else if self.materialized_view_names.contains(&name) {
+        } else if self
+            .materialized_view_names
+            .contains(IdentKeyStr::new(name))
+        {
             // Remove from tables
-            self.remove_table(&name);
+            self.remove_table(name);
 
             // Remove DBSP state table and its indexes from in-memory schema
             let dbsp_table_name = format!("{DBSP_TABLE_PREFIX}{DBSP_CIRCUIT_VERSION}_{name}");
@@ -1204,13 +1211,13 @@ impl Schema {
             self.remove_indices_for_table(&dbsp_table_name);
 
             // Remove from materialized view tracking
-            self.materialized_view_names.remove(&name);
-            self.materialized_view_sql.remove(&name);
-            self.incremental_views.remove(&name);
+            self.materialized_view_names.remove(IdentKeyStr::new(name));
+            self.materialized_view_sql.remove(IdentKeyStr::new(name));
+            self.incremental_views.remove(IdentKeyStr::new(name));
 
             // Remove from table_to_materialized_views dependencies
             for views in self.table_to_materialized_views.values_mut() {
-                views.retain(|v| v != &name);
+                views.retain(|view| view != name);
             }
 
             Ok(())
@@ -1223,13 +1230,10 @@ impl Schema {
 
     /// Register that a materialized view depends on a table
     pub fn add_materialized_view_dependency(&mut self, table_name: &str, view_name: &str) {
-        let table_name = normalize_ident(table_name);
-        let view_name = normalize_ident(view_name);
-
         self.table_to_materialized_views
-            .entry(table_name)
+            .entry(IdentKey::from_unquoted(table_name))
             .or_insert_with(|| vec![])
-            .push(view_name);
+            .push(IdentKey::from_unquoted(view_name));
     }
 
     /// Get all materialized views that depend on a given table
@@ -1237,35 +1241,31 @@ impl Schema {
         if self.table_to_materialized_views.is_empty() {
             return vec![];
         }
-        let table_name = normalize_ident(table_name);
         self.table_to_materialized_views
-            .get(&table_name)
-            .cloned()
+            .get(IdentKeyStr::new(table_name))
+            .map(|views| views.iter().map(ToString::to_string).collect())
             .unwrap_or_else(|| vec![])
     }
 
     /// Add a regular (non-materialized) view
     pub fn add_view(&mut self, view: View) -> Result<()> {
         self.check_object_name_conflict(&view.name, SchemaObjectType::View)?;
-        let name = normalize_ident(&view.name);
+        let name = IdentKey::from_unquoted(&view.name);
         self.views.insert(name, Arc::new(view));
         Ok(())
     }
 
     /// Get a regular view by name
     pub fn get_view(&self, name: &str) -> Option<Arc<View>> {
-        let name = normalize_ident(name);
-        self.views.get(&name).cloned()
+        self.views.get(IdentKeyStr::new(name)).cloned()
     }
 
-    pub fn add_trigger(&mut self, trigger: Trigger, table_name: &str) -> Result<()> {
+    pub fn add_trigger(&mut self, trigger: Trigger) -> Result<()> {
         // Triggers have their own namespace and duplicate trigger names
         // are checked in `translate_create_trigger`
-        let table_name = normalize_ident(table_name);
-
         // See [Schema::add_index] for why we push to the front of the deque.
         self.triggers
-            .entry(table_name)
+            .entry(trigger.table_name.to_key())
             .or_default()
             .push_front(Arc::new(trigger));
 
@@ -1273,13 +1273,11 @@ impl Schema {
     }
 
     pub fn remove_trigger(&mut self, name: &str) -> Result<()> {
-        let name = normalize_ident(name);
-
         let mut removed = false;
         for triggers_list in self.triggers.values_mut() {
             for i in 0..triggers_list.len() {
                 let trigger = &triggers_list[i];
-                if normalize_ident(&trigger.name) == name {
+                if trigger.name.eq_ignore_ascii_case(name) {
                     removed = true;
                     triggers_list.remove(i);
                     break;
@@ -1297,8 +1295,7 @@ impl Schema {
         Ok(())
     }
     pub fn remove_triggers_for_table(&mut self, table_name: &str) {
-        let table_name = normalize_ident(table_name);
-        self.triggers.remove(&table_name);
+        self.triggers.remove(IdentKeyStr::new(table_name));
     }
 
     pub fn set_trigger_target_database_id(
@@ -1306,12 +1303,11 @@ impl Schema {
         trigger_name: &str,
         target_database_id: usize,
     ) -> Result<()> {
-        let trigger_name = normalize_ident(trigger_name);
         let trigger = self
             .triggers
             .values_mut()
             .flatten()
-            .find(|trigger| normalize_ident(&trigger.name) == trigger_name)
+            .find(|trigger| trigger.name.eq_ignore_ascii_case(trigger_name))
             .ok_or_else(|| {
                 crate::LimboError::InternalError(format!(
                     "new trigger {trigger_name} was not loaded into the schema"
@@ -1329,14 +1325,13 @@ impl Schema {
     /// `aux.t` (the plain `remove_triggers_for_table` keys only on
     /// table name).
     pub fn remove_triggers_for_table_with_db(&mut self, table_name: &str, target_db: usize) {
-        let table_name = normalize_ident(table_name);
-        let Some(bucket) = self.triggers.get_mut(&table_name) else {
+        let Some(bucket) = self.triggers.get_mut(IdentKeyStr::new(table_name)) else {
             return;
         };
         // Check once whether this schema has a table with the same name.
         // If it does, unqualified triggers resolve to that local table,
         // not to the one being dropped in `target_db`.
-        let has_shadow_table = self.tables.contains_key(&table_name);
+        let has_shadow_table = self.tables.contains_key(IdentKeyStr::new(table_name));
         bucket.retain(|trigger| {
             match trigger.target_database_id {
                 Some(db) => db != target_db,
@@ -1346,41 +1341,42 @@ impl Schema {
             }
         });
         if bucket.is_empty() {
-            self.triggers.remove(&table_name);
+            self.triggers.remove(IdentKeyStr::new(table_name));
         }
     }
 
     pub fn get_trigger_for_table(&self, table_name: &str, name: &str) -> Option<Arc<Trigger>> {
-        let table_name = normalize_ident(table_name);
-        let name = normalize_ident(name);
         self.triggers
-            .get(&table_name)
-            .and_then(|triggers| triggers.iter().find(|t| t.name == name).cloned())
+            .get(IdentKeyStr::new(table_name))
+            .and_then(|triggers| {
+                triggers
+                    .iter()
+                    .find(|trigger| trigger.name.eq_ignore_ascii_case(name))
+                    .cloned()
+            })
     }
 
     pub fn get_triggers_for_table(
         &self,
         table_name: &str,
     ) -> impl Iterator<Item = &Arc<Trigger>> + Clone {
-        let table_name = normalize_ident(table_name);
         self.triggers
-            .get(&table_name)
+            .get(IdentKeyStr::new(table_name))
             .map(|triggers| triggers.iter())
             .unwrap_or_default()
     }
 
     pub fn get_trigger(&self, name: &str) -> Option<Arc<Trigger>> {
-        let name = normalize_ident(name);
         self.triggers
             .values()
             .flatten()
-            .find(|t| t.name == name)
+            .find(|trigger| trigger.name.eq_ignore_ascii_case(name))
             .cloned()
     }
 
     pub fn add_btree_table(&mut self, table: Arc<BTreeTable>) -> Result<()> {
         self.check_object_name_conflict(&table.name, SchemaObjectType::Table)?;
-        let name = normalize_ident(&table.name);
+        let name = IdentKey::from_unquoted(&table.name);
         #[cfg(feature = "conn_raw_api")]
         self.table_names_by_root_page
             .insert(table.root_page, name.clone());
@@ -1390,41 +1386,47 @@ impl Schema {
 
     pub fn add_virtual_table(&mut self, table: Arc<VirtualTable>) -> Result<()> {
         self.check_object_name_conflict(&table.name, SchemaObjectType::Table)?;
-        let name = normalize_ident(&table.name);
-        self.tables.insert(name, Table::Virtual(table).into());
+        self.tables.insert(
+            IdentKey::from_unquoted(&table.name),
+            Table::Virtual(table).into(),
+        );
         Ok(())
     }
 
     pub fn get_table(&self, name: &str) -> Option<Arc<Table>> {
-        let name = self.normalize_table_lookup_name(name);
-        self.tables.get(&name).cloned()
+        self.tables
+            .get(IdentKeyStr::new(Self::table_lookup_name(name)))
+            .cloned()
     }
 
     #[cfg(feature = "conn_raw_api")]
     pub fn table_name_for_root_page(&self, root_page: i64) -> Option<&str> {
         self.table_names_by_root_page
             .get(&root_page)
-            .map(String::as_str)
+            .map(IdentKey::as_str)
     }
 
     pub fn remove_table(&mut self, table_name: &str) {
-        let name = normalize_ident(table_name);
         #[cfg(feature = "conn_raw_api")]
         {
-            if let Some(table) = self.tables.remove(&name) {
+            if let Some(table) = self.tables.remove(IdentKeyStr::new(table_name)) {
                 self.unregister_table_root_page(&table);
             }
         }
         #[cfg(not(feature = "conn_raw_api"))]
         {
-            self.tables.remove(&name);
+            self.tables.remove(IdentKeyStr::new(table_name));
         }
-        self.analyze_stats.remove_table(&name);
+        self.analyze_stats.remove_table(table_name);
 
         // If this was a materialized view, also clean up the metadata
-        if self.materialized_view_names.remove(&name) {
-            self.incremental_views.remove(&name);
-            self.materialized_view_sql.remove(&name);
+        if self
+            .materialized_view_names
+            .remove(IdentKeyStr::new(table_name))
+        {
+            self.incremental_views.remove(IdentKeyStr::new(table_name));
+            self.materialized_view_sql
+                .remove(IdentKeyStr::new(table_name));
         }
     }
 
@@ -1432,7 +1434,7 @@ impl Schema {
     pub fn register_table_root_page(&mut self, name: &str, table: &Table) {
         if let Table::BTree(table) = table {
             self.table_names_by_root_page
-                .insert(table.root_page, normalize_ident(name));
+                .insert(table.root_page, IdentKey::from_unquoted(name));
         }
     }
 
@@ -1444,8 +1446,8 @@ impl Schema {
     }
 
     pub fn get_btree_table(&self, name: &str) -> Option<Arc<BTreeTable>> {
-        let name = self.normalize_table_lookup_name(name);
-        if let Some(table) = self.tables.get(&name) {
+        let name = Self::table_lookup_name(name);
+        if let Some(table) = self.tables.get(IdentKeyStr::new(name)) {
             table.btree()
         } else {
             None
@@ -1454,7 +1456,7 @@ impl Schema {
 
     pub fn add_index(&mut self, index: Arc<Index>) -> Result<()> {
         self.check_object_name_conflict(&index.name, SchemaObjectType::Index)?;
-        let table_name = normalize_ident(&index.table_name);
+        let table_name = IdentKey::from_unquoted(&index.table_name);
         // We must add the new index to the front of the deque, because SQLite stores index definitions as a linked list
         // where the newest parsed index entry is at the head of list. If we would add it to the back of a regular Vec for example,
         // then we would evaluate ON CONFLICT DO UPDATE clauses in the wrong index iteration order and UPDATE the wrong row.
@@ -1490,9 +1492,8 @@ impl Schema {
     }
 
     pub fn get_indices(&self, table_name: &str) -> impl Iterator<Item = &Arc<Index>> {
-        let name = normalize_ident(table_name);
         self.indexes
-            .get(&name)
+            .get(IdentKeyStr::new(table_name))
             .map(|v| v.iter())
             .unwrap_or_default()
             .filter(|i| !i.is_backing_btree_index())
@@ -1508,35 +1509,31 @@ impl Schema {
     }
 
     pub fn get_index(&self, table_name: &str, index_name: &str) -> Option<&Arc<Index>> {
-        let name = normalize_ident(table_name);
         self.indexes
-            .get(&name)?
+            .get(IdentKeyStr::new(table_name))?
             .iter()
-            .find(|index| index.name == index_name)
+            .find(|index| index.name.eq_ignore_ascii_case(index_name))
     }
 
     pub fn remove_indices_for_table(&mut self, table_name: &str) {
-        let name = normalize_ident(table_name);
-        self.indexes.remove(&name);
-        self.analyze_stats.remove_table(&name);
+        self.indexes.remove(IdentKeyStr::new(table_name));
+        self.analyze_stats.remove_table(table_name);
     }
 
     pub fn remove_index(&mut self, idx: &Index) {
-        let name = normalize_ident(&idx.table_name);
         self.indexes
-            .get_mut(&name)
+            .get_mut(IdentKeyStr::new(&idx.table_name))
             .expect("Must have the index")
             .retain_mut(|other_idx| other_idx.name != idx.name);
-        self.analyze_stats.remove_index(&name, &idx.name);
+        self.analyze_stats.remove_index(&idx.table_name, &idx.name);
     }
 
     pub fn table_has_indexes(&self, table_name: &str) -> bool {
-        let name = normalize_ident(table_name);
-        self.has_indexes.contains(&name)
+        self.has_indexes.contains(IdentKeyStr::new(table_name))
     }
 
     pub fn table_set_has_index(&mut self, table_name: &str) {
-        self.has_indexes.insert(table_name.to_string());
+        self.has_indexes.insert(IdentKey::from_unquoted(table_name));
     }
 
     /// Update [Schema] by scanning the first root page (sqlite_schema)
@@ -1784,7 +1781,7 @@ impl Schema {
         &mut self,
         syms: &SymbolTable,
         from_sql_indexes: Vec<UnparsedFromSqlIndex>,
-        automatic_indices: HashMap<String, Vec<(String, i64)>>,
+        automatic_indices: HashMap<IdentKey, Vec<(String, i64)>>,
         mvcc_enabled: bool,
     ) -> Result<()> {
         for unparsed_sql_from_index in from_sql_indexes {
@@ -1929,9 +1926,9 @@ impl Schema {
     /// Populate materialized views parsed from the schema.
     pub fn populate_materialized_views(
         &mut self,
-        materialized_view_info: HashMap<String, (String, i64)>,
-        dbsp_state_roots: HashMap<String, i64>,
-        dbsp_state_index_roots: HashMap<String, i64>,
+        materialized_view_info: HashMap<IdentKey, (String, i64)>,
+        dbsp_state_roots: HashMap<IdentKey, i64>,
+        dbsp_state_index_roots: HashMap<IdentKey, i64>,
     ) -> Result<()> {
         for (view_name, (sql, main_root)) in materialized_view_info {
             // Look up the DBSP state root for this view
@@ -1945,7 +1942,8 @@ impl Schema {
                     view_name
                 );
                 // Track this as an incompatible view
-                self.incompatible_views.insert(view_name.clone());
+                self.incompatible_views
+                    .insert(IdentKey::from_unquoted(&view_name));
                 // Use a dummy root page - the view won't be usable anyway
                 0
             };
@@ -1983,7 +1981,7 @@ impl Schema {
             let logical_to_physical_map =
                 BTreeTable::build_logical_to_physical_map(&cols, &[], true);
             let table = Arc::new(Table::BTree(Arc::new(BTreeTable {
-                name: view_name.clone(),
+                name: view_name.to_string(),
                 root_page: main_root,
                 columns: cols,
                 primary_key_columns: vec![],
@@ -2006,7 +2004,7 @@ impl Schema {
 
             // Register dependencies regardless of compatibility
             for table_name in referenced_tables {
-                self.add_materialized_view_dependency(&table_name, &view_name);
+                self.add_materialized_view_dependency(&table_name, view_name.as_str());
             }
         }
         Ok(())
@@ -2020,7 +2018,7 @@ impl Schema {
             .keys()
             .filter_map(|name| {
                 let seq_name = name.strip_prefix(SEQ_BACKING_TABLE_PREFIX)?;
-                Some((name.clone(), seq_name.to_string()))
+                Some((name.as_str().to_owned(), seq_name.to_string()))
             })
             .try_collect()
             .expect(crate::alloc::ALLOC_ERR_MSG)
@@ -2083,8 +2081,10 @@ impl Schema {
                 metadata.start, metadata.increment, metadata.min, metadata.max, metadata.cycle,
             ))
         })?;
-        self.sequences
-            .insert(normalize_ident(sequence_name), std::sync::Arc::new(seq));
+        self.sequences.insert(
+            IdentKey::from_unquoted(sequence_name),
+            std::sync::Arc::new(seq),
+        );
         Ok(())
     }
 
@@ -2098,10 +2098,10 @@ impl Schema {
         maybe_sql: Option<&str>,
         syms: &SymbolTable,
         from_sql_indexes: &mut Vec<UnparsedFromSqlIndex>,
-        automatic_indices: &mut HashMap<String, Vec<(String, i64)>>,
-        dbsp_state_roots: &mut HashMap<String, i64>,
-        dbsp_state_index_roots: &mut HashMap<String, i64>,
-        materialized_view_info: &mut HashMap<String, (String, i64)>,
+        automatic_indices: &mut HashMap<IdentKey, Vec<(String, i64)>>,
+        dbsp_state_roots: &mut HashMap<IdentKey, i64>,
+        dbsp_state_index_roots: &mut HashMap<IdentKey, i64>,
+        materialized_view_info: &mut HashMap<IdentKey, (String, i64)>,
         // Resolves an attached database name (case-insensitive) to its
         // connection-local database id. Used when reparsing temp trigger
         // SQL that qualifies its target with an attached db name like
@@ -2134,7 +2134,7 @@ impl Schema {
                     // a virtual table is found in the sqlite_schema, but it's no
                     // longer in the in-memory schema. We need to recreate it if
                     // the module is loaded in the symbol table.
-                    let vtab = if let Some(vtab) = syms.vtabs.get(name) {
+                    let vtab = if let Some(vtab) = syms.vtabs.get(IdentKeyStr::new(name)) {
                         vtab.clone()
                     } else {
                         let mod_name = module_name_from_sql(sql)?;
@@ -2178,7 +2178,8 @@ impl Schema {
                             if let Ok(stored_version) = version_str.parse::<u32>() {
                                 if stored_version == DBSP_CIRCUIT_VERSION {
                                     // Version matches, store the root page
-                                    dbsp_state_roots.insert(view_name.to_string(), root_page);
+                                    dbsp_state_roots
+                                        .insert(IdentKey::from_unquoted(view_name), root_page);
                                 } else {
                                     // Version mismatch - DO NOT insert into dbsp_state_roots
                                     // This will cause populate_materialized_views to skip this view
@@ -2210,7 +2211,7 @@ impl Schema {
                     if has_autoinc {
                         let seq_name = autoincrement_sequence_name(&tbl_name);
                         if let std::collections::hash_map::Entry::Vacant(e) =
-                            self.sequences.entry(normalize_ident(&seq_name))
+                            self.sequences.entry(IdentKey::from_unquoted(&seq_name))
                         {
                             let seq = Sequence::new(
                                 seq_name.clone(),
@@ -2229,7 +2230,7 @@ impl Schema {
                 match maybe_sql {
                     Some(sql) => {
                         from_sql_indexes.push(UnparsedFromSqlIndex {
-                            table_name: table_name.to_string(),
+                            table_name: IdentKey::from_unquoted(table_name),
                             root_page,
                             sql: sql.to_string(),
                         });
@@ -2239,7 +2240,7 @@ impl Schema {
                         // table|foo|foo|2|CREATE TABLE foo (a text PRIMARY KEY, b)
                         // index|sqlite_autoindex_foo_1|foo|3|
                         let index_name = name.to_string();
-                        let table_name = table_name.to_string();
+                        let table_name = IdentKey::from_unquoted(table_name);
 
                         // Check if this is an index for a DBSP state table
                         if table_name.starts_with(DBSP_TABLE_PREFIX) {
@@ -2255,7 +2256,7 @@ impl Schema {
                                 if let Ok(stored_version) = version_str.parse::<u32>() {
                                     if stored_version == DBSP_CIRCUIT_VERSION {
                                         dbsp_state_index_roots
-                                            .insert(view_name.to_string(), root_page);
+                                            .insert(IdentKey::from_unquoted(view_name), root_page);
                                     }
                                 }
                             }
@@ -2278,7 +2279,7 @@ impl Schema {
                 use turso_parser::parser::Parser;
 
                 let sql = maybe_sql.expect("sql should be present for view");
-                let view_name = name.to_string();
+                let view_name = IdentKey::from_unquoted(name);
 
                 // Parse the SQL to determine if it's a regular or materialized view
                 let mut parser = Parser::new(sql.as_bytes());
@@ -2383,25 +2384,18 @@ impl Schema {
                         resolve_attached_db(db).unwrap_or(crate::INVALID_DB_ID)
                     }
                 });
-                self.add_trigger(
-                    Trigger::new(
-                        trigger_name,
-                        sql.to_string(),
-                        // Store the bare (unquoted) table name. `Name::to_string()`
-                        // renders the quoted form (`"t1"`), which then fails every
-                        // schema lookup since `normalize_ident` does not strip quotes.
-                        // This must match the bucket key used in `add_trigger` below.
-                        tbl_name.name.as_str().to_string(),
-                        time,
-                        event,
-                        for_each_row,
-                        when_clause.map(|e| *e),
-                        commands,
-                        temporary,
-                        target_database_id,
-                    ),
-                    tbl_name.name.as_str(),
-                )?;
+                self.add_trigger(Trigger::new(
+                    trigger_name,
+                    sql.to_string(),
+                    tbl_name.name,
+                    time,
+                    event,
+                    for_each_row,
+                    when_clause.map(|e| *e),
+                    commands,
+                    temporary,
+                    target_database_id,
+                ))?;
             }
             // Types are stored in sqlite_turso_types, not sqlite_schema
             _ => {}
@@ -2414,10 +2408,9 @@ impl Schema {
     /// Each item contains the child table, normalized columns/positions, and the parent lookup
     /// strategy (rowid vs. UNIQUE index or PK).
     pub fn resolved_fks_referencing(&self, table_name: &str) -> Result<Vec<ResolvedFkRef>> {
-        let target = normalize_ident(table_name);
         let parent_tbl = self
-            .get_btree_table(&target)
-            .ok_or_else(|| fk_mismatch_err("<unknown>", &target))?;
+            .get_btree_table(table_name)
+            .ok_or_else(|| fk_mismatch_err("<unknown>", table_name))?;
 
         let mut out = Vec::try_with_capacity_ext(4)?; // arbitrary estimate
         for t in self.tables.values() {
@@ -2425,7 +2418,7 @@ impl Schema {
                 continue;
             };
             for fk in &child.foreign_keys {
-                if !fk.parent_table.eq_ignore_ascii_case(&target) {
+                if !fk.parent_table.eq_ignore_ascii_case(table_name) {
                     continue;
                 }
                 out.try_push(self.resolve_fk(
@@ -2443,17 +2436,15 @@ impl Schema {
     /// Unlike `resolved_fks_referencing`, this requires every non-rowid parent key
     /// to be backed by a non-partial UNIQUE index on exactly those columns.
     pub fn resolved_fks_for_child(&self, child_table: &str) -> crate::Result<Vec<ResolvedFkRef>> {
-        let child_name = normalize_ident(child_table);
         let child = self
-            .get_btree_table(&child_name)
-            .ok_or_else(|| fk_mismatch_err(&child_name, "<unknown>"))?;
+            .get_btree_table(child_table)
+            .ok_or_else(|| fk_mismatch_err(child_table, "<unknown>"))?;
 
         let mut out = Vec::try_with_capacity_ext(child.foreign_keys.len())?;
         for fk in &child.foreign_keys {
-            let parent_name = normalize_ident(&fk.parent_table);
             let parent_tbl = self
-                .get_btree_table(&parent_name)
-                .ok_or_else(|| fk_mismatch_err(&child.name, &parent_name))?;
+                .get_btree_table(&fk.parent_table)
+                .ok_or_else(|| fk_mismatch_err(&child.name, &fk.parent_table))?;
             out.push_within_capacity(self.resolve_fk(
                 fk,
                 &child,
@@ -2614,27 +2605,26 @@ impl Schema {
     }
 
     pub fn get_sequence(&self, name: &str) -> Option<&Arc<Sequence>> {
-        self.sequences.get(&normalize_ident(name))
+        self.sequences.get(IdentKeyStr::new(name))
     }
 
     /// Remove a sequence and its backing table from the in-memory schema.
     pub fn remove_sequence(&mut self, name: &str) {
-        let normalized = normalize_ident(name);
-        self.sequences.remove(&normalized);
-        let backing_table = crate::translate::sequence::sequence_backing_table_name(&normalized);
-        self.tables.remove(&backing_table);
+        self.sequences.remove(IdentKeyStr::new(name));
+        let backing_table = crate::translate::sequence::sequence_backing_table_name(name);
+        self.tables.remove(IdentKeyStr::new(&backing_table));
     }
 
     /// Returns the type of schema object with the given name, if one exists.
     /// Checks tables, views, and indexes.
     pub fn get_object_type(&self, name: &str) -> Option<SchemaObjectType> {
-        let normalized_name = self.normalize_table_lookup_name(name);
+        let normalized_name = Self::table_lookup_name(name);
 
-        if self.tables.contains_key(&normalized_name) {
+        if self.tables.contains_key(IdentKeyStr::new(normalized_name)) {
             return Some(SchemaObjectType::Table);
         }
 
-        if self.views.contains_key(&normalized_name) {
+        if self.views.contains_key(IdentKeyStr::new(normalized_name)) {
             return Some(SchemaObjectType::View);
         }
 
@@ -3680,7 +3670,7 @@ impl BTreeTable {
                     sql.push(' ');
                     if let Some(name) = &check_constraint.name {
                         sql.push_str("CONSTRAINT ");
-                        sql.push_str(&Name::exact(name.clone()).as_ident());
+                        sql.push_str(&Name::exact_ref(name).as_ident());
                         sql.push(' ');
                     }
                     sql.push_str(&check_constraint.sql());
@@ -3754,7 +3744,7 @@ impl BTreeTable {
             sql.push_str(", ");
             if let Some(name) = &check_constraint.name {
                 sql.push_str("CONSTRAINT ");
-                sql.push_str(&Name::exact(name.clone()).as_ident());
+                sql.push_str(&Name::exact_ref(name).as_ident());
                 sql.push(' ');
             }
             sql.push_str(&check_constraint.sql());
@@ -4094,29 +4084,28 @@ impl FromClauseSubquery {
     }
 }
 
-fn collect_column_refs(expr: &Expr) -> HashSet<String> {
+fn collect_column_refs(expr: &Expr) -> HashSet<IdentKey> {
     collect_column_dependencies_of_expr(expr, &[])
 }
 
 /// Extract all column name references from an expression as a set.
 /// `columns` is used to resolve pre-resolved `Expr::Column { SELF_TABLE }` back to names.
-//TODO all this usage of [normalize_ident] should be replaced with a proper [Identifier] domain type.
-pub fn collect_column_dependencies_of_expr(expr: &Expr, columns: &[Column]) -> HashSet<String> {
+pub fn collect_column_dependencies_of_expr(expr: &Expr, columns: &[Column]) -> HashSet<IdentKey> {
     let mut refs = HashSet::default();
 
     let _ = walk_expr(expr, &mut |e| match e {
         Expr::Id(name) | Expr::Name(name) => {
-            refs.insert(normalize_ident(name.as_str()));
+            refs.insert(name.to_key());
             Ok(WalkControl::Continue)
         }
         Expr::Qualified(_, col) | Expr::DoublyQualified(_, _, col) => {
-            refs.insert(normalize_ident(col.as_str()));
+            refs.insert(col.to_key());
             Ok(WalkControl::Continue)
         }
         Expr::Column { table, column, .. } if table.is_self_table() => {
             if let Some(col) = columns.get(*column) {
                 if let Some(name) = &col.name {
-                    refs.insert(normalize_ident(name));
+                    refs.insert(IdentKey::from_unquoted(name));
                 }
             }
             Ok(WalkControl::Continue)
@@ -4173,16 +4162,15 @@ fn find_column_index_by_name(columns: &[Column], col_name: &str) -> Option<usize
 pub fn resolve_gencol_expr_columns(gencol_expr: &mut Expr, columns: &[Column]) -> Result<()> {
     walk_expr_mut(gencol_expr, &mut |e| match e {
         Expr::Id(name) | Expr::Qualified(_, name) | Expr::DoublyQualified(_, _, name) => {
-            let col_name = normalize_ident(name.as_str());
             let (idx, col) = columns
                 .iter()
                 .enumerate()
                 .find(|(_, c)| {
                     c.name
                         .as_ref()
-                        .is_some_and(|n| n.eq_ignore_ascii_case(&col_name))
+                        .is_some_and(|n| n.eq_ignore_ascii_case(name.as_str()))
                 })
-                .ok_or_else(|| LimboError::ParseError(format!("no such column: {col_name}")))?;
+                .ok_or_else(|| LimboError::ParseError(format!("no such column: {name}")))?;
             *e = Expr::Column {
                 database: None,
                 table: TableInternalId::SELF_TABLE,
@@ -4208,7 +4196,7 @@ pub fn render_gencol_expr_sql_with_new_names(expr: &Expr, columns: &[Column]) ->
             if table.is_self_table() {
                 if let Some(col) = columns.get(*column) {
                     if let Some(name) = col.name.as_ref() {
-                        *e = Expr::Id(Name::exact(name.clone()));
+                        *e = Expr::Id(Name::exact_ref(name));
                     }
                 }
             }
@@ -4444,7 +4432,7 @@ fn constraint_column_collation(expr: &Expr) -> Result<(&Expr, Option<CollationSe
 }
 
 pub fn create_table(tbl_name: &str, body: &CreateTableBody, root_page: i64) -> Result<BTreeTable> {
-    let table_name = normalize_ident(tbl_name);
+    let table_name = String::from(IdentKey::from_unquoted(tbl_name));
     trace!("Creating table {}", table_name);
     let has_rowid;
     let mut has_autoincrement = false;
@@ -4499,9 +4487,9 @@ pub fn create_table(tbl_name: &str, body: &CreateTableBody, root_page: i64) -> R
                     for column in columns {
                         let (expr, collation) = constraint_column_collation(column.expr.as_ref())?;
                         let col_name = match expr {
-                            Expr::Id(id) => normalize_ident(id.as_str()),
+                            Expr::Id(id) => String::from(id.to_key()),
                             Expr::Literal(Literal::String(value)) => {
-                                value.trim_matches('\'').to_owned()
+                                String::from(IdentKey::new(value))
                             }
                             expr => {
                                 bail_parse_error!("unsupported primary key expression: {}", expr)
@@ -4530,9 +4518,9 @@ pub fn create_table(tbl_name: &str, body: &CreateTableBody, root_page: i64) -> R
                     for column in columns {
                         let (expr, collation) = constraint_column_collation(column.expr.as_ref())?;
                         let col_name = match expr {
-                            Expr::Id(id) => id.as_str().to_string(),
+                            Expr::Id(id) => String::from(id.to_key()),
                             Expr::Literal(Literal::String(value)) => {
-                                value.trim_matches('\'').to_owned()
+                                String::from(IdentKey::new(value))
                             }
                             expr => {
                                 bail_parse_error!("unsupported unique key expression: {}", expr)
@@ -4559,14 +4547,14 @@ pub fn create_table(tbl_name: &str, body: &CreateTableBody, root_page: i64) -> R
                 {
                     let child_columns: Box<[String]> = columns
                         .iter()
-                        .map(|ic| normalize_ident(ic.col_name.as_str()))
+                        .map(|ic| String::from(ic.col_name.to_key()))
                         .try_collect()?;
                     // derive parent columns: explicit or default to parent PK
-                    let parent_table = normalize_ident(clause.tbl_name.as_str());
+                    let parent_table = String::from(clause.tbl_name.to_key());
                     let parent_columns: Box<[String]> = clause
                         .columns
                         .iter()
-                        .map(|ic| normalize_ident(ic.col_name.as_str()))
+                        .map(|ic| String::from(ic.col_name.to_key()))
                         .try_collect()?;
 
                     // Only check arity if parent columns were explicitly listed
@@ -4787,11 +4775,11 @@ pub fn create_table(tbl_name: &str, body: &CreateTableBody, root_page: i64) -> R
                                 );
                             }
                             let fk = ForeignKey {
-                                parent_table: normalize_ident(clause.tbl_name.as_str()),
+                                parent_table: String::from(clause.tbl_name.to_key()),
                                 parent_columns: clause
                                     .columns
                                     .iter()
-                                    .map(|c| normalize_ident(c.col_name.as_str()))
+                                    .map(|c| String::from(c.col_name.to_key()))
                                     .try_collect()?,
                                 on_delete: clause
                                     .args
@@ -4849,9 +4837,9 @@ pub fn create_table(tbl_name: &str, body: &CreateTableBody, root_page: i64) -> R
                     }
 
                     let referenced_cols = collect_column_refs(gen_expr);
-                    let current_col_name = normalize_ident(&name);
+                    let current_col_name = IdentKeyStr::new(&name);
 
-                    if referenced_cols.iter().any(|c| c == &current_col_name) {
+                    if referenced_cols.contains(current_col_name) {
                         bail_parse_error!("generated column \"{}\" cannot reference itself", name);
                     }
                 }
@@ -5827,7 +5815,7 @@ impl Index {
                 with_clause,
                 ..
             })) => {
-                let index_name = normalize_ident(idx_name.name.as_str());
+                let index_name = String::from(idx_name.name.to_key());
                 let index_columns = resolve_sorted_columns(table, &columns)?;
                 if let Some(using) = using {
                     if where_clause.is_some() {
@@ -5837,7 +5825,8 @@ impl Index {
                         bail_parse_error!("custom index module do not support UNIQUE indices");
                     }
                     let parameters = resolve_index_method_parameters(with_clause)?;
-                    let Some(module) = syms.index_methods.get(using.as_str()) else {
+                    let Some(module) = syms.index_methods.get(IdentKeyStr::new(using.as_str()))
+                    else {
                         bail_parse_error!("unknown module name: '{}'", using);
                     };
                     let configuration = IndexMethodConfiguration {
@@ -5849,7 +5838,7 @@ impl Index {
                     let descriptor = module.attach(&configuration)?;
                     Ok(Index {
                         name: index_name,
-                        table_name: normalize_ident(tbl_name.as_str()),
+                        table_name: String::from(tbl_name.to_key()),
                         root_page,
                         columns: index_columns,
                         unique: false,
@@ -5862,7 +5851,7 @@ impl Index {
                 } else {
                     Ok(Index {
                         name: index_name,
-                        table_name: normalize_ident(tbl_name.as_str()),
+                        table_name: String::from(tbl_name.to_key()),
                         root_page,
                         columns: index_columns,
                         unique,
@@ -5913,7 +5902,7 @@ impl Index {
             let (_, column) = table.get_column(col_name).unwrap();
             primary_keys
                 .push_within_capacity(IndexColumn {
-                    name: normalize_ident(col_name),
+                    name: String::from(IdentKey::from_unquoted(col_name)),
                     order: *order,
                     nulls_order: constraint_columns.get(i).and_then(|c| c.nulls_order),
                     pos_in_table,
@@ -5930,7 +5919,7 @@ impl Index {
         assert!(primary_keys.len() == column_count);
 
         Ok(Index {
-            name: normalize_ident(index_name.as_str()),
+            name: String::from(IdentKey::from_unquoted(&index_name)),
             table_name: table.name.clone(),
             root_page,
             columns: primary_keys,
@@ -5967,7 +5956,7 @@ impl Index {
             };
             unique_cols
                 .push_within_capacity(IndexColumn {
-                    name: normalize_ident(col.name.as_ref().unwrap()),
+                    name: String::from(IdentKey::from_unquoted(col.name.as_deref().unwrap())),
                     order: *sort_order,
                     nulls_order: constraint_columns.get(i).and_then(|c| c.nulls_order),
                     pos_in_table,
@@ -5982,7 +5971,7 @@ impl Index {
         }
 
         Ok(Index {
-            name: normalize_ident(index_name.as_str()),
+            name: String::from(IdentKey::from_unquoted(&index_name)),
             table_name: table.name.clone(),
             root_page,
             columns: unique_cols,
@@ -6033,10 +6022,10 @@ impl Index {
                     .is_some_and(|cn| cn.eq_ignore_ascii_case(name))
             })
         };
-        let is_tbl = |ns: &str| normalize_ident(ns) == tbl_norm;
+        let is_tbl = |ns: &str| IdentKeyStr::new(ns) == tbl_norm;
         let is_deterministic_fn = |name: &str, argc: usize| {
-            let n = normalize_ident(name);
-            Func::resolve_function(&n, argc).is_ok_and(|f| f.is_some_and(|f| f.is_deterministic()))
+            Func::resolve_function(name, argc)
+                .is_ok_and(|f| f.is_some_and(|f| f.is_deterministic()))
         };
 
         let mut ok = true;
@@ -6138,7 +6127,7 @@ impl Index {
                 .filter(|(_, table)| {
                     table
                         .btree()
-                        .is_some_and(|bt| normalize_ident(&bt.name) == self.table_name)
+                        .is_some_and(|bt| *IdentKeyStr::new(&bt.name) == self.table_name)
                 })
                 .map(|(identifier, _)| identifier);
             let target = matches.next().cloned();
@@ -6152,8 +6141,8 @@ impl Index {
         if let Some(identifier) = target_identifier {
             walk_expr_mut(&mut expr, &mut |e: &mut Expr| {
                 if let Expr::Qualified(ns, _) | Expr::DoublyQualified(_, ns, _) = e {
-                    if normalize_ident(ns.as_str()) == self.table_name {
-                        *ns = Name::exact(identifier.clone());
+                    if ns == &self.table_name {
+                        *ns = Name::exact_ref(&identifier);
                     }
                 }
                 Ok(WalkControl::Continue)
@@ -6174,6 +6163,70 @@ impl Index {
 mod tests {
     use super::*;
     use crate::alloc::vec;
+
+    #[test]
+    fn system_table_prefixes_use_identifier_case_rules() {
+        assert!(is_system_table("SQLITE_SCHEMA"));
+        assert!(is_system_table(
+            "__TURSO_INTERNAL_A_NAME_LONG_ENOUGH_TO_SPILL"
+        ));
+        assert!(!is_system_table("sqlité_schema"));
+    }
+
+    #[test]
+    fn table_keys_apply_identifier_rules_without_lookup_allocation() -> Result<()> {
+        let mut schema = Schema::new();
+        let table = Arc::new(BTreeTable::from_sql(
+            r#"CREATE TABLE "MixedCase" (value INTEGER)"#,
+            2,
+        )?);
+        schema.add_btree_table(table)?;
+
+        let stored_name = schema
+            .tables
+            .keys()
+            .find(|name| *name == "mixedcase")
+            .expect("table key should exist");
+        assert_eq!(stored_name.as_str(), "mixedcase");
+        assert!(stored_name.is_inline());
+        assert!(schema.tables.contains_key(IdentKeyStr::new("MIXEDCASE")));
+        assert!(schema.get_table("MiXeDcAsE").is_some());
+        assert!(schema.get_table("SQLITE_MASTER").is_some());
+        #[cfg(feature = "conn_raw_api")]
+        assert_eq!(schema.table_name_for_root_page(2), Some("mixedcase"));
+
+        let quoted_name = Arc::new(BTreeTable::from_sql(
+            r#"CREATE TABLE """Quoted""" (value INTEGER)"#,
+            3,
+        )?);
+        schema.add_btree_table(quoted_name)?;
+        assert!(schema.get_table(r#""QUOTED""#).is_some());
+        assert!(schema.get_table("QUOTED").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn trigger_targets_keep_sql_spelling_and_use_identifier_keys() -> Result<()> {
+        let mut schema = Schema::new();
+        schema.add_trigger(Trigger::new(
+            "tr".to_owned(),
+            String::new(),
+            Name::from_string(r#""MixedCase""#),
+            None,
+            ast::TriggerEvent::Insert,
+            false,
+            None,
+            vec![],
+            false,
+            None,
+        ))?;
+
+        let trigger = schema
+            .get_trigger_for_table("MIXEDCASE", "tr")
+            .expect("trigger lookup should follow identifier rules");
+        assert_eq!(trigger.table_name.as_ident(), r#""MixedCase""#);
+        Ok(())
+    }
 
     #[test]
     pub fn test_has_rowid_true() -> Result<()> {
@@ -7388,7 +7441,9 @@ mod tests {
             "expected Corrupt error for unreadable internal backing table, got: {err:?}",
         );
         assert!(
-            !schema.sequences.contains_key("broken_seq"),
+            !schema
+                .sequences
+                .contains_key(IdentKeyStr::new("broken_seq")),
             "rejected descriptor must not land in the sequences map",
         );
     }

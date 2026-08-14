@@ -119,7 +119,7 @@ pub(super) fn emit_custom_type_operator(
 
 /// Info about a column with a custom type, extracted from an expression.
 pub(super) struct ExprCustomTypeInfo {
-    type_name: String,
+    type_name: crate::IdentKey,
     column: Column,
     type_def: Arc<TypeDef>,
 }
@@ -144,7 +144,7 @@ pub(super) fn expr_custom_type_info(
             .schema()
             .get_type_def(type_name, table.is_strict())?;
         return Some(ExprCustomTypeInfo {
-            type_name: type_name.to_lowercase(),
+            type_name: crate::IdentKey::from_unquoted(type_name),
             column: col.clone(),
             type_def: Arc::clone(type_def),
         });
@@ -460,12 +460,14 @@ pub(super) fn emit_domain_cast_constraints(
             // Bind `value` → reg, translate check expr, verify truthy
             program
                 .id_register_overrides
-                .insert("value".to_string(), reg);
+                .insert(crate::IdentKey::from_unquoted("value"), reg);
 
             let expr_result_reg = program.alloc_register();
             translate_expr(program, None, &dc.check, expr_result_reg, resolver)?;
 
-            program.id_register_overrides.remove("value");
+            program
+                .id_register_overrides
+                .remove(crate::IdentKeyStr::new("value"));
 
             let passed_label = program.allocate_label();
 
@@ -513,7 +515,7 @@ pub(crate) fn emit_type_expr(
     // Set up value override
     program
         .id_register_overrides
-        .insert("value".to_string(), value_reg);
+        .insert(crate::IdentKey::from_unquoted("value"), value_reg);
 
     // Set up type parameter overrides. Capture the result so we can
     // clean up overrides even if param translation fails.
@@ -527,7 +529,7 @@ pub(crate) fn emit_type_expr(
                 translate_expr(program, None, param_expr, reg, resolver)?;
                 program
                     .id_register_overrides
-                    .insert(param.name.clone(), reg);
+                    .insert(crate::IdentKey::from_unquoted(&param.name), reg);
             }
         }
         Ok(())

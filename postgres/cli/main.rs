@@ -139,14 +139,13 @@ fn auto_attach_pg_schemas(conn: &Connection, db_file: &str) {
         let Some(name) = file_name.to_str() else {
             continue;
         };
-        let Some(schema) = name
-            .strip_prefix("turso-postgres-schema-")
-            .and_then(|s| s.strip_suffix(".db"))
-        else {
+        let Some(schema) = turso_pg::postgres_schema_name_from_file_name(name) else {
             continue;
         };
         let path = entry.path().to_string_lossy().to_string();
-        let sql = format!("ATTACH '{path}' AS \"{schema}\"");
+        let escaped_path = path.replace('\'', "''");
+        let escaped_schema = schema.replace('"', "\"\"");
+        let sql = format!("ATTACH '{escaped_path}' AS \"{escaped_schema}\"");
         tracing::info!("Auto-attaching PG schema '{}' from {}", schema, path);
         if let Err(e) = conn.inner().execute(&sql) {
             tracing::warn!("Failed to attach schema '{}': {}", schema, e);

@@ -1216,7 +1216,7 @@ fn uses_outer_tables_outside_where(plan: &SelectPlan, outer_table_ids: &[TableIn
 /// Keep the zero that `count` and `total` return for an empty input.
 fn coalesce_with_zero(value: Expr, zero: &str) -> Expr {
     Expr::FunctionCall {
-        name: Name::exact("coalesce".to_string()),
+        name: Name::exact_ref("coalesce"),
         distinctness: None,
         args: vec![
             Box::new(value),

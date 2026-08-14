@@ -3,6 +3,7 @@ use std::{
     sync::atomic::Ordering,
 };
 
+use crate::IdentKeyStr;
 use turso_parser::ast::{self, SortOrder};
 
 use crate::numeric::Numeric;
@@ -359,15 +360,18 @@ impl VectorSparseInvertedIndexMethodCursor {
     pub fn new(configuration: IndexMethodConfiguration) -> Self {
         let inverted_index_btree = format!("{}_inverted_index", configuration.index_name);
         let stats_btree = format!("{}_stats", configuration.index_name);
-        let delta = match configuration.parameters.get("delta") {
+        let delta = match configuration.parameters.get(IdentKeyStr::new("delta")) {
             Some(&Value::Numeric(Numeric::Float(delta))) => f64::from(delta),
             _ => 0.0,
         };
-        let scan_portion = match configuration.parameters.get("scan_portion") {
+        let scan_portion = match configuration
+            .parameters
+            .get(IdentKeyStr::new("scan_portion"))
+        {
             Some(&Value::Numeric(Numeric::Float(scan_portion))) => f64::from(scan_portion),
             _ => 1.0,
         };
-        let scan_order = match configuration.parameters.get("scan_order") {
+        let scan_order = match configuration.parameters.get(IdentKeyStr::new("scan_order")) {
             Some(Value::Text(scan_order)) if scan_order.as_str() == "dataset_frequency_asc" => {
                 ScanOrder::DatasetFrequencyAsc
             }

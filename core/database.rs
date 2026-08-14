@@ -43,7 +43,7 @@ use crate::{
         },
         Arc, LazyLock, Mutex, RwLock, Weak,
     },
-    turso_assert, turso_assert_greater_than_or_equal,
+    turso_assert, turso_assert_greater_than_or_equal, turso_assert_unreachable,
     types::{self, IOCompletions},
     vdbe::metrics::ConnectionMetrics,
     AtomicSyncMode, AtomicTempStore, AtomicTransactionState, Buffer, BufferPool, CipherMode,
@@ -58,7 +58,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::path::Path;
 #[cfg(host_shared_wal)]
 use std::sync::OnceLock;
-use std::{fmt, ops::Deref};
+use std::{collections::hash_map::Entry, fmt, ops::Deref};
 #[cfg(feature = "fs")]
 use storage::database::DatabaseFile;
 #[cfg(host_shared_wal)]
@@ -3188,7 +3188,7 @@ impl Database {
 
 // Optimized for fast get() operations and supports unlimited attached databases.
 pub(crate) struct DatabaseCatalog {
-    pub(crate) name_to_index: HashMap<String, usize>,
+    pub(crate) name_to_index: HashMap<crate::IdentKey, usize>,
     allocated: Vec<u64>,
     pub(crate) index_to_data: HashMap<usize, (Arc<Database>, Arc<Pager>)>,
 }
@@ -3213,11 +3213,11 @@ impl DatabaseCatalog {
         self.name_to_index
             .iter()
             .find(|(_, &idx)| idx == index)
-            .map(|(name, _)| name.clone())
+            .map(|(name, _)| name.to_string())
     }
 
     pub(crate) fn get_database_by_name(&self, s: &str) -> Option<(usize, Arc<Database>)> {
-        match self.name_to_index.get(s) {
+        match self.name_to_index.get(crate::IdentKeyStr::new(s)) {
             None => None,
             Some(idx) => self
                 .index_to_data
@@ -3235,15 +3235,19 @@ impl DatabaseCatalog {
     }
 
     fn add(&mut self, s: &str) -> usize {
-        turso_assert!(
-            !self.name_to_index.contains_key(s),
-            "lib: database name already exists in catalog",
-            { "name": s }
-        );
-
-        let index = self.allocate_index();
-        self.name_to_index.insert(s.to_string(), index);
-        index
+        let key = crate::IdentKey::from_unquoted(s);
+        match self.name_to_index.entry(key) {
+            Entry::Occupied(_) => {
+                turso_assert_unreachable!("lib: database name already exists in catalog", {
+                    "name": s
+                })
+            }
+            Entry::Vacant(entry) => {
+                let index = Self::allocate_index(&mut self.allocated);
+                entry.insert(index);
+                index
+            }
+        }
     }
 
     pub(crate) fn insert(&mut self, s: &str, data: (Arc<Database>, Arc<Pager>)) -> usize {
@@ -3253,7 +3257,7 @@ impl DatabaseCatalog {
     }
 
     pub(crate) fn remove(&mut self, s: &str) -> Option<usize> {
-        if let Some(index) = self.name_to_index.remove(s) {
+        if let Some(index) = self.name_to_index.remove(crate::IdentKeyStr::new(s)) {
             // Should be impossible to remove main or temp.
             turso_assert_greater_than_or_equal!(index, 2);
             self.deallocate_index(index);
@@ -3274,23 +3278,21 @@ impl DatabaseCatalog {
         }
     }
 
-    fn allocate_index(&mut self) -> usize {
-        for word_idx in 0..self.allocated.len() {
-            let word = self.allocated[word_idx];
-
-            if word != u64::MAX {
-                let free_bit = Self::find_first_zero_bit(word);
+    fn allocate_index(allocated: &mut Vec<u64>) -> usize {
+        for (word_idx, word) in allocated.iter_mut().enumerate() {
+            if *word != u64::MAX {
+                let free_bit = Self::find_first_zero_bit(*word);
                 let index = word_idx * 64 + free_bit;
 
-                self.allocated[word_idx] |= 1u64 << free_bit;
+                *word |= 1u64 << free_bit;
 
                 return index;
             }
         }
 
         // Need to expand bitmap
-        let word_idx = self.allocated.len();
-        self.allocated.push(1u64); // Mark first bit as allocated
+        let word_idx = allocated.len();
+        allocated.push(1u64); // Mark first bit as allocated
         word_idx * 64
     }
 
@@ -3311,7 +3313,7 @@ mod database_tests {
         Arc,
     };
 
-    use super::{is_memory_like, Database, InitState};
+    use super::{is_memory_like, Database, DatabaseCatalog, InitState};
     use crate::storage::encryption::EncryptionKey;
     use crate::storage::page_transform::{
         PageCodec, PageCodecContext, PageCodecHeaderInfo, PageCodecId, PageLocation,
@@ -3331,6 +3333,14 @@ mod database_tests {
         assert!(is_memory_like(""));
         assert!(!is_memory_like("memory.db"));
         assert!(!is_memory_like("file:memory.db"));
+    }
+
+    #[test]
+    #[should_panic(expected = "database name already exists in catalog")]
+    fn database_catalog_rejects_case_variant_duplicate_names() {
+        let mut catalog = DatabaseCatalog::new();
+        catalog.add("LongAttachedDatabaseName");
+        catalog.add("LONGATTACHEDDATABASENAME");
     }
 
     #[cfg(feature = "fs")]

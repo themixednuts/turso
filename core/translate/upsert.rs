@@ -8,6 +8,7 @@ use super::emitter::gencol::compute_virtual_columns;
 use crate::alloc::TursoIteratorExt;
 use crate::error::SQLITE_CONSTRAINT_PRIMARYKEY;
 use crate::schema::{BTreeTable, ColumnLayout, IndexColumn, ROWID_SENTINEL};
+use crate::translate::collate::CollationSeq;
 use crate::translate::emitter::{emit_check_constraints, emit_make_record, UpdateRowSource};
 use crate::translate::expr::{walk_expr, WalkControl};
 use crate::translate::fkeys::{
@@ -36,7 +37,7 @@ use crate::{
         insert::Insertion,
         plan::{ResultSetColumn, TableReferences},
     },
-    util::{exprs_are_equivalent, normalize_ident},
+    util::exprs_are_equivalent,
     vdbe::{
         affinity::Affinity,
         builder::{DmlColumnContext, ProgramBuilder},
@@ -81,9 +82,9 @@ use crate::{CaptureDataChangesExt, Connection};
 #[derive(Debug, Clone)]
 pub struct ConflictTarget {
     /// The normalized column name in question
-    col_name: String,
+    col_name: crate::IdentKey,
     /// Possible collation name, normalized to lowercase
-    collate: Option<String>,
+    collate: Option<crate::IdentKey>,
 }
 
 // Extract `(column, optional_collate)` from an ON CONFLICT target Expr.
@@ -92,21 +93,19 @@ fn extract_conflict_target(e: &ast::Expr) -> Option<ConflictTarget> {
     match e {
         ast::Expr::Collate(inner, collation) => {
             let mut conflict_target = extract_conflict_target(inner.as_ref())?;
-            let collation_str = collation.as_str();
-            conflict_target.collate = Some(collation_str.to_ascii_lowercase());
+            conflict_target.collate = Some(collation.to_key());
             Some(conflict_target)
         }
         ast::Expr::Parenthesized(v) if v.len() == 1 => extract_conflict_target(&v[0]),
 
         ast::Expr::Id(name) => Some(ConflictTarget {
-            col_name: normalize_ident(name.as_str()),
+            col_name: name.to_key(),
             collate: None,
         }),
         // t.a or db.t.a: accept ident or quoted in the column position
         ast::Expr::Qualified(_, col) | ast::Expr::DoublyQualified(_, _, col) => {
-            let cname = col.as_str();
             Some(ConflictTarget {
-                col_name: normalize_ident(cname),
+                col_name: col.to_key(),
                 collate: None,
             })
         }
@@ -117,11 +116,11 @@ fn extract_conflict_target(e: &ast::Expr) -> Option<ConflictTarget> {
 /// For an ON CONFLICT target that is an expression (not a simple column),
 /// extract the inner expression and an optional COLLATE annotation.
 /// E.g. `lower(val) COLLATE nocase` -> (lower(val), Some("nocase"))
-fn extract_target_expr(e: &ast::Expr) -> (&ast::Expr, Option<String>) {
+fn extract_target_expr(e: &ast::Expr) -> (&ast::Expr, Option<crate::IdentKey>) {
     match e {
         ast::Expr::Collate(inner, c) => {
             let (expr, _) = extract_target_expr(inner.as_ref());
-            (expr, Some(c.as_str().to_ascii_lowercase()))
+            (expr, Some(c.to_key()))
         }
         ast::Expr::Parenthesized(v) if v.len() == 1 => extract_target_expr(&v[0]),
         _ => (e, None),
@@ -130,15 +129,26 @@ fn extract_target_expr(e: &ast::Expr) -> (&ast::Expr, Option<String>) {
 
 // Return the index key’s effective collation.
 // If `idx_col.collation` is None, fall back to the column default or "BINARY".
-fn effective_collation_for_index_col(idx_col: &IndexColumn, table: &Table) -> String {
+fn effective_collation_for_index_col(idx_col: &IndexColumn, table: &Table) -> CollationSeq {
     if let Some(c) = idx_col.collation.as_ref() {
-        return c.to_string().to_ascii_lowercase();
+        return *c;
     }
     // Otherwise use the table default, or default to BINARY
     table
         .get_column_by_name(&idx_col.name)
-        .map(|s| s.1.collation().to_string())
-        .unwrap_or_else(|| "binary".to_string())
+        .map(|s| s.1.collation())
+        .unwrap_or(CollationSeq::Binary)
+}
+
+fn collation_matches_name(collation: CollationSeq, name: &str) -> bool {
+    let name = crate::IdentKeyStr::new(name);
+    match collation {
+        CollationSeq::Unset => name == "unset",
+        CollationSeq::Binary => name == "binary",
+        CollationSeq::NoCase => name == "nocase",
+        CollationSeq::Rtrim => name == "rtrim",
+        CollationSeq::Locale(_) | CollationSeq::Custom(_) => *name == collation.name(),
+    }
 }
 
 /// Match ON CONFLICT target to the PRIMARY KEY/rowid alias.
@@ -228,7 +238,7 @@ fn index_expression_cols(table: &Table, out: &mut ColumnMask, expr: &ast::Expr) 
     let _ = walk_expr(expr, &mut |e: &ast::Expr| -> crate::Result<WalkControl> {
         match e {
             Expr::Id(n) => {
-                if let Some((i, _)) = table.get_column_by_name(&normalize_ident(n.as_str())) {
+                if let Some((i, _)) = table.get_column_by_name(n.as_str()) {
                     out.set(i)?;
                 } else if ROWID_STRS
                     .iter()
@@ -243,10 +253,8 @@ fn index_expression_cols(table: &Table, out: &mut ColumnMask, expr: &ast::Expr) 
                 }
             }
             Expr::Qualified(ns, c) | Expr::DoublyQualified(_, ns, c) => {
-                let nsn = normalize_ident(ns.as_str());
-                let tname = normalize_ident(table.get_name());
-                if nsn.eq_ignore_ascii_case(&tname) {
-                    if let Some((i, _)) = table.get_column_by_name(&normalize_ident(c.as_str())) {
+                if ns == table.get_name() {
+                    if let Some((i, _)) = table.get_column_by_name(c.as_str()) {
                         out.set(i)?;
                     }
                 }
@@ -259,16 +267,12 @@ fn index_expression_cols(table: &Table, out: &mut ColumnMask, expr: &ast::Expr) 
 }
 
 fn bind_partial_index_where_expr(expr: &mut ast::Expr, table: &Table) {
-    let table_name = normalize_ident(table.get_name());
-
     let _ = walk_expr_mut(
         expr,
         &mut |e: &mut ast::Expr| -> crate::Result<WalkControl> {
             match e {
                 ast::Expr::Id(name) => {
-                    if let Some((column, col)) =
-                        table.get_column_by_name(&normalize_ident(name.as_str()))
-                    {
+                    if let Some((column, col)) = table.get_column_by_name(name.as_str()) {
                         *e = ast::Expr::Column {
                             database: None,
                             table: ast::TableInternalId::SELF_TABLE,
@@ -286,11 +290,9 @@ fn bind_partial_index_where_expr(expr: &mut ast::Expr, table: &Table) {
                     }
                 }
                 ast::Expr::Qualified(ns, col) | ast::Expr::DoublyQualified(_, ns, col)
-                    if normalize_ident(ns.as_str()).eq_ignore_ascii_case(&table_name) =>
+                    if ns == table.get_name() =>
                 {
-                    if let Some((column, table_col)) =
-                        table.get_column_by_name(&normalize_ident(col.as_str()))
-                    {
+                    if let Some((column, table_col)) = table.get_column_by_name(col.as_str()) {
                         *e = ast::Expr::Column {
                             database: None,
                             table: ast::TableInternalId::SELF_TABLE,
@@ -365,11 +367,10 @@ pub fn upsert_matches_index(upsert: &Upsert, index: &Index, table: &Table) -> bo
                 if matched.get(i) || ic.expr.is_some() {
                     continue;
                 }
-                let iname = normalize_ident(&ic.name);
                 let icoll = effective_collation_for_index_col(ic, table);
-                if tname.eq_ignore_ascii_case(&iname)
+                if tname == &ic.name
                     && match conflict_target.collate.as_ref() {
-                        Some(c) => c.eq_ignore_ascii_case(&icoll),
+                        Some(c) => collation_matches_name(icoll, c.as_str()),
                         None => true, // unspecified collation -> accept any
                     }
                 {
@@ -390,7 +391,7 @@ pub fn upsert_matches_index(upsert: &Upsert, index: &Index, table: &Table) -> bo
                         // If target specifies a collation, it must match the index column's.
                         if let Some(ref tc) = target_collate {
                             let icoll = effective_collation_for_index_col(ic, table);
-                            if !tc.eq_ignore_ascii_case(&icoll) {
+                            if !collation_matches_name(icoll, tc.as_str()) {
                                 continue;
                             }
                         }
@@ -1532,11 +1533,15 @@ pub fn collect_set_clauses_for_upsert(
     table: &Table,
     set_items: &mut [ast::Set],
 ) -> crate::Result<Vec<(usize, Box<ast::Expr>)>> {
-    let lookup: HashMap<String, usize> = table
+    let lookup: HashMap<crate::IdentKey, usize> = table
         .columns()
         .iter()
         .enumerate()
-        .filter_map(|(i, c)| c.name.as_ref().map(|n| (n.to_lowercase(), i)))
+        .filter_map(|(i, c)| {
+            c.name
+                .as_deref()
+                .map(|n| (crate::IdentKey::from_unquoted(n), i))
+        })
         .collect();
 
     let mut out: Vec<(usize, Box<ast::Expr>)> = vec![];
@@ -1554,7 +1559,7 @@ pub fn collect_set_clauses_for_upsert(
             );
         }
         for (cn, e) in set.col_names.iter().zip(values.into_iter()) {
-            let Some(idx) = lookup.get(&normalize_ident(cn.as_str())) else {
+            let Some(idx) = lookup.get(cn.as_key_str()) else {
                 bail_parse_error!("no such column: {}", cn);
             };
             // cannot upsert generated column
@@ -1663,7 +1668,7 @@ fn rewrite_expr_to_registers(
     layout: &ColumnLayout,
 ) -> crate::Result<WalkControl> {
     use ast::Expr;
-    let table_name_norm = table_name.map(normalize_ident);
+    let table_name: Option<&crate::IdentKeyStr> = table_name.map(crate::IdentKeyStr::new);
 
     // Map a column name to a register within the row image at `base_start`.
     let col_reg_from_row_image = |name: &str| -> Option<usize> {
@@ -1683,19 +1688,19 @@ fn rewrite_expr_to_registers(
         &mut |expr: &mut ast::Expr| -> crate::Result<WalkControl> {
             match expr {
                 Expr::Qualified(ns, c) | Expr::DoublyQualified(_, ns, c) => {
-                    let ns = normalize_ident(ns.as_str());
-                    let c = normalize_ident(c.as_str());
+                    let ns = ns.as_str();
+                    let c = c.as_str();
                     // Handle EXCLUDED.* if enabled
                     if allow_excluded && ns.eq_ignore_ascii_case("excluded") {
                         if let Some(ins) = insertion {
-                            if ROWID_STRS.iter().any(|s| s.eq_ignore_ascii_case(&c)) {
+                            if ROWID_STRS.iter().any(|s| s.eq_ignore_ascii_case(c)) {
                                 *expr = Expr::Register(ins.key_register());
-                            } else if let Some(cm) = ins.get_col_mapping_by_name(&c) {
+                            } else if let Some(cm) = ins.get_col_mapping_by_name(c) {
                                 // Use decoded excluded registers when available
                                 // to prevent double-encoding of custom type values
                                 if let Some(decoded_start) = excluded_decoded_start {
                                     let (col_idx, _) =
-                                        table.get_column_by_name(&c).expect("column exists");
+                                        table.get_column_by_name(c).expect("column exists");
                                     *expr = Expr::Register(
                                         decoded_start + layout.to_reg_offset(col_idx),
                                     );
@@ -1711,9 +1716,9 @@ fn rewrite_expr_to_registers(
                     }
 
                     // Match the target table namespace if provided
-                    if let Some(ref tn) = table_name_norm {
-                        if ns.eq_ignore_ascii_case(tn) {
-                            if let Some(r) = col_reg_from_row_image(&c) {
+                    if let Some(tn) = table_name {
+                        if tn == ns {
+                            if let Some(r) = col_reg_from_row_image(c) {
                                 *expr = Expr::Register(r);
                             } else {
                                 bail_parse_error!("no such column: {}.{}", ns, c);
@@ -1732,7 +1737,7 @@ fn rewrite_expr_to_registers(
                 }
                 // Unqualified id -> row image (CURRENT/NEW depending on caller)
                 Expr::Id(name) => {
-                    if let Some(r) = col_reg_from_row_image(&normalize_ident(name.as_str())) {
+                    if let Some(r) = col_reg_from_row_image(name.as_str()) {
                         *expr = Expr::Register(r);
                     }
                 }

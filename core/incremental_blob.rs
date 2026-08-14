@@ -258,7 +258,7 @@ fn check_column_writable(
     }
     if schema
         .table_to_materialized_views
-        .get(&table.name)
+        .get(crate::IdentKeyStr::new(&table.name))
         .is_some_and(|views| !views.is_empty())
     {
         return Err(LimboError::InternalError(format!(

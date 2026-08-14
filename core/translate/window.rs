@@ -157,7 +157,7 @@ fn prepare_window_subquery(
         //
         // If the generated name is not unique across the entire query, that’s acceptable —
         // the final plan always associates exactly one window with one subquery.
-        current_window.name = Some(format!("window_{processed_window_count}"));
+        current_window.name = Some(format!("window_{processed_window_count}").into());
     }
 
     let mut ctx = WindowSubqueryContext {
@@ -419,7 +419,7 @@ fn push_into_source_subquery(
 /// `WindowFunction`.
 fn rewrite_expr_referencing_current_window(
     aggregates: &mut Vec<Aggregate>,
-    window_name: String,
+    window_name: crate::IdentKey,
     ctx: &mut WindowSubqueryContext,
     expr: &mut Expr,
     func: &AccumulatorFunc,
@@ -454,7 +454,7 @@ fn rewrite_expr_referencing_current_window(
         push_into_source_subquery(filter_expr, aggregates, ctx)?;
     }
     let filter_expr = filter_over.filter_clause.as_deref().cloned();
-    filter_over.over_clause = Some(Over::Name(Name::exact(window_name)));
+    filter_over.over_clause = Some(Over::Name(Name::exact(String::from(window_name))));
     Ok(RewrittenWindowCall {
         expr: expr.clone(),
         filter_expr,

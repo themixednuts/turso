@@ -761,10 +761,10 @@ impl<'a> Parser<'a> {
             .position(|&b| b == b']')
             .ok_or(Error::ParseUnexpectedEOF)?;
         let raw = &self.lexer.input[start..start + end_pos];
-        let name = String::from_utf8_lossy(raw).into_owned();
+        let name = String::from_utf8_lossy(raw);
         // Advance lexer past the closing `]`
         self.lexer.offset = start + end_pos + 1;
-        Ok(Name::bracketed(name))
+        Ok(Name::bracketed_ref(&name))
     }
 
     fn parse_transopt(&mut self) -> Result<Option<Name>> {
@@ -2658,12 +2658,10 @@ impl<'a> Parser<'a> {
                 Some(tok) if tok.token_type == TK_COMMA => {
                     eat_assert!(self, TK_COMMA);
                     let cte = self.parse_common_table_expr()?;
-                    if ctes.iter().any(|existing| {
-                        existing
-                            .tbl_name
-                            .as_str()
-                            .eq_ignore_ascii_case(cte.tbl_name.as_str())
-                    }) {
+                    if ctes
+                        .iter()
+                        .any(|existing| existing.tbl_name == cte.tbl_name)
+                    {
                         return Err(Error::Custom(format!(
                             "duplicate WITH table name: {}",
                             cte.tbl_name
@@ -3094,7 +3092,7 @@ impl<'a> Parser<'a> {
                     if text.is_empty() {
                         None
                     } else {
-                        Some(As::ImplicitColumnName(Name::exact(text.to_string())))
+                        Some(As::ImplicitColumnName(Name::exact_ref(text)))
                     }
                 });
                 Ok(ResultColumn::Expr(expr, alias))
@@ -4825,7 +4823,9 @@ impl<'a> Parser<'a> {
                     let param_ty = match self.peek()? {
                         Some(t) if t.token_type == TK_ID => {
                             let ty_tok = self.eat()?;
-                            Some(from_bytes(ty_tok.unwrap().as_bytes()).to_lowercase())
+                            Some(String::from(crate::IdentKey::from_unquoted(&from_bytes(
+                                ty_tok.unwrap().as_bytes(),
+                            ))))
                         }
                         _ => None,
                     };
@@ -4858,7 +4858,9 @@ impl<'a> Parser<'a> {
 
         let base_type_tok = self.eat()?;
         let base = match base_type_tok {
-            Some(tok) if tok.token_type == TK_ID => from_bytes(tok.as_bytes()).to_lowercase(),
+            Some(tok) if tok.token_type == TK_ID => {
+                String::from(crate::IdentKey::from_unquoted(&from_bytes(tok.as_bytes())))
+            }
             _ => return Err(Error::ParseError("expected base type name".to_owned())),
         };
 

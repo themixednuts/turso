@@ -8,12 +8,40 @@ use turso_core::{
     Result, Value, VirtualTable,
 };
 use turso_ext::{ConstraintInfo, IndexInfo, OrderByInfo, ResultCode, VTabKind};
-use turso_parser::ast::RefAct;
+use turso_parser::{ast::RefAct, IdentKeyStr};
 
 /// Starting OID for user tables (matches PostgreSQL convention)
 const USER_TABLE_OID_START: i64 = 16384;
 const PRIMARY_KEY_AUTOMATIC_INDEX_NAME_PREFIX: &str = "sqlite_autoindex_";
 const STORED_PG_SCHEMA_PREFIX: &str = "/* turso_frontend:postgres */ ";
+const CATALOG_TABLE_NAMES: &[&str] = &[
+    "pg_am",
+    "pg_attrdef",
+    "pg_attribute",
+    "pg_class",
+    "pg_collation",
+    "pg_constraint",
+    "pg_database",
+    "pg_description",
+    "pg_foreign_table",
+    "pg_get_tabledef",
+    "pg_index",
+    "pg_inherits",
+    "pg_input_error_info",
+    "pg_namespace",
+    "pg_partitioned_table",
+    "pg_policy",
+    "pg_proc",
+    "pg_publication",
+    "pg_publication_namespace",
+    "pg_publication_rel",
+    "pg_rewrite",
+    "pg_roles",
+    "pg_sequences",
+    "pg_tables",
+    "pg_trigger",
+    "pg_type",
+];
 
 #[derive(Debug)]
 pub struct PostgresDialect;
@@ -161,35 +189,10 @@ impl Dialect for PostgresDialect {
 }
 
 pub fn is_catalog_table_name(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "pg_class"
-            | "pg_namespace"
-            | "pg_attribute"
-            | "pg_roles"
-            | "pg_proc"
-            | "pg_database"
-            | "pg_am"
-            | "pg_type"
-            | "pg_collation"
-            | "pg_attrdef"
-            | "pg_description"
-            | "pg_publication"
-            | "pg_publication_namespace"
-            | "pg_publication_rel"
-            | "pg_sequences"
-            | "pg_constraint"
-            | "pg_index"
-            | "pg_inherits"
-            | "pg_rewrite"
-            | "pg_foreign_table"
-            | "pg_partitioned_table"
-            | "pg_trigger"
-            | "pg_policy"
-            | "pg_input_error_info"
-            | "pg_get_tabledef"
-            | "pg_tables"
-    )
+    let name = IdentKeyStr::new(name);
+    CATALOG_TABLE_NAMES
+        .binary_search_by(|candidate| IdentKeyStr::new(candidate).cmp(name))
+        .is_ok()
 }
 
 pub fn encode_pg_schema_sql(sql: &str) -> String {
@@ -202,7 +205,7 @@ pub fn decode_stored_pg_schema_sql(sql: &str) -> Option<&str> {
 
 /// Returns an iterator of (table_name, table_ref) for user tables in deterministic order.
 /// Both pg_class and pg_attribute must use this function to ensure consistent OID assignment.
-fn user_tables_sorted(schema: &Schema) -> Vec<(&String, &Arc<Table>)> {
+fn user_tables_sorted(schema: &Schema) -> Vec<(&str, &Arc<Table>)> {
     let mut tables: Vec<_> = schema
         .tables
         .iter()
@@ -218,6 +221,7 @@ fn user_tables_sorted(schema: &Schema) -> Vec<(&String, &Arc<Table>)> {
             // Skip virtual tables and subqueries
             matches!(table.as_ref(), Table::BTree(_))
         })
+        .map(|(name, table)| (name.as_str(), table))
         .collect();
     tables.sort_by_key(|(name, _)| *name);
     tables
@@ -258,11 +262,11 @@ fn sqlite_type_to_pg_oid(ty_str: &str) -> i64 {
 }
 
 /// Build a mapping from table name to OID for all user tables.
-fn table_oid_map(schema: &Schema) -> HashMap<String, i64> {
+fn table_oid_map(schema: &Schema) -> HashMap<&str, i64> {
     let tables = user_tables_sorted(schema);
     let mut map = HashMap::default();
     for (i, (name, _)) in tables.iter().enumerate() {
-        map.insert((*name).clone(), USER_TABLE_OID_START + i as i64);
+        map.insert(*name, USER_TABLE_OID_START + i as i64);
     }
     map
 }
@@ -403,39 +407,39 @@ impl PgClassCursor {
             let relchecks = btree.check_constraints.len() as i64;
 
             self.rows.push(vec![
-                Value::from_i64(table_oid),                // oid
-                Value::Text((*table_name).clone().into()), // relname
-                Value::from_i64(2200),                     // relnamespace (public schema)
-                Value::from_i64(0),                        // reltype
-                Value::from_i64(0),                        // reloftype
-                Value::from_i64(10),                       // relowner
-                Value::from_i64(2),                        // relam (heap)
-                Value::from_i64(0),                        // relfilenode
-                Value::from_i64(0),                        // reltablespace
-                Value::from_i64(1),                        // relpages
-                Value::from_f64(0.0),                      // reltuples
-                Value::from_i64(0),                        // relallvisible
-                Value::from_i64(0),                        // reltoastrelid
-                Value::from_i64(relhasindex),              // relhasindex
-                Value::from_i64(0),                        // relisshared
-                Value::Text("p".into()),                   // relpersistence (permanent)
-                Value::Text("r".into()),                   // relkind (regular table)
-                Value::from_i64(relnatts),                 // relnatts
-                Value::from_i64(relchecks),                // relchecks
-                Value::from_i64(0),                        // relhasrules
-                Value::from_i64(0),                        // relhastriggers
-                Value::from_i64(0),                        // relhassubclass
-                Value::from_i64(0),                        // relrowsecurity
-                Value::from_i64(0),                        // relforcerowsecurity
-                Value::from_i64(1),                        // relispopulated
-                Value::Text("d".into()),                   // relreplident
-                Value::from_i64(0),                        // relispartition
-                Value::from_i64(0),                        // relrewrite
-                Value::from_i64(0),                        // relfrozenxid
-                Value::from_i64(0),                        // relminmxid
-                Value::Null,                               // relacl
-                Value::Null,                               // reloptions
-                Value::Null,                               // relpartbound
+                Value::from_i64(table_oid),        // oid
+                Value::Text((*table_name).into()), // relname
+                Value::from_i64(2200),             // relnamespace (public schema)
+                Value::from_i64(0),                // reltype
+                Value::from_i64(0),                // reloftype
+                Value::from_i64(10),               // relowner
+                Value::from_i64(2),                // relam (heap)
+                Value::from_i64(0),                // relfilenode
+                Value::from_i64(0),                // reltablespace
+                Value::from_i64(1),                // relpages
+                Value::from_f64(0.0),              // reltuples
+                Value::from_i64(0),                // relallvisible
+                Value::from_i64(0),                // reltoastrelid
+                Value::from_i64(relhasindex),      // relhasindex
+                Value::from_i64(0),                // relisshared
+                Value::Text("p".into()),           // relpersistence (permanent)
+                Value::Text("r".into()),           // relkind (regular table)
+                Value::from_i64(relnatts),         // relnatts
+                Value::from_i64(relchecks),        // relchecks
+                Value::from_i64(0),                // relhasrules
+                Value::from_i64(0),                // relhastriggers
+                Value::from_i64(0),                // relhassubclass
+                Value::from_i64(0),                // relrowsecurity
+                Value::from_i64(0),                // relforcerowsecurity
+                Value::from_i64(1),                // relispopulated
+                Value::Text("d".into()),           // relreplident
+                Value::from_i64(0),                // relispartition
+                Value::from_i64(0),                // relrewrite
+                Value::from_i64(0),                // relfrozenxid
+                Value::from_i64(0),                // relminmxid
+                Value::Null,                       // relacl
+                Value::Null,                       // reloptions
+                Value::Null,                       // relpartbound
             ]);
         }
 
@@ -1593,14 +1597,14 @@ impl PgTablesCursor {
 
         for (table_name, _) in user_tables_sorted(&schema) {
             self.rows.push(vec![
-                Value::Text("public".into()),           // schemaname
-                Value::Text(table_name.clone().into()), // tablename
-                Value::Text("turso".into()),            // tableowner
-                Value::Null,                            // tablespace
-                Value::from_i64(0),                     // hasindexes
-                Value::from_i64(0),                     // hasrules
-                Value::from_i64(0),                     // hastriggers
-                Value::from_i64(0),                     // rowsecurity
+                Value::Text("public".into()),   // schemaname
+                Value::Text(table_name.into()), // tablename
+                Value::Text("turso".into()),    // tableowner
+                Value::Null,                    // tablespace
+                Value::from_i64(0),             // hasindexes
+                Value::from_i64(0),             // hasrules
+                Value::from_i64(0),             // hastriggers
+                Value::from_i64(0),             // rowsecurity
             ]);
         }
 
@@ -2073,38 +2077,38 @@ impl PgTypeCursor {
                     .fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64))
                     % 10000) as i64;
             self.rows.push(vec![
-                Value::from_i64(enum_oid),        // oid
-                Value::Text(name.clone().into()), // typname
-                Value::from_i64(11),              // typnamespace (pg_catalog)
-                Value::from_i64(10),              // typowner
-                Value::from_i64(4),               // typlen
-                Value::from_i64(1),               // typbyval
-                Value::build_text("e"),           // typtype (enum)
-                Value::build_text("E"),           // typcategory (enum)
-                Value::from_i64(0),               // typispreferred
-                Value::from_i64(1),               // typisdefined
-                Value::build_text(","),           // typdelim
-                Value::from_i64(0),               // typrelid
-                Value::Null,                      // typsubscript
-                Value::from_i64(0),               // typelem
-                Value::from_i64(0),               // typarray
-                Value::Null,                      // typinput
-                Value::Null,                      // typoutput
-                Value::Null,                      // typreceive
-                Value::Null,                      // typsend
-                Value::Null,                      // typmodin
-                Value::Null,                      // typmodout
-                Value::Null,                      // typanalyze
-                Value::build_text("i"),           // typalign
-                Value::build_text("p"),           // typstorage
-                Value::from_i64(0),               // typnotnull
-                Value::from_i64(0),               // typbasetype
-                Value::from_i64(-1),              // typtypmod
-                Value::from_i64(0),               // typndims
-                Value::from_i64(0),               // typcollation
-                Value::Null,                      // typdefaultbin
-                Value::Null,                      // typdefault
-                Value::Null,                      // typacl
+                Value::from_i64(enum_oid),           // oid
+                Value::build_text(name.to_string()), // typname
+                Value::from_i64(11),                 // typnamespace (pg_catalog)
+                Value::from_i64(10),                 // typowner
+                Value::from_i64(4),                  // typlen
+                Value::from_i64(1),                  // typbyval
+                Value::build_text("e"),              // typtype (enum)
+                Value::build_text("E"),              // typcategory (enum)
+                Value::from_i64(0),                  // typispreferred
+                Value::from_i64(1),                  // typisdefined
+                Value::build_text(","),              // typdelim
+                Value::from_i64(0),                  // typrelid
+                Value::Null,                         // typsubscript
+                Value::from_i64(0),                  // typelem
+                Value::from_i64(0),                  // typarray
+                Value::Null,                         // typinput
+                Value::Null,                         // typoutput
+                Value::Null,                         // typreceive
+                Value::Null,                         // typsend
+                Value::Null,                         // typmodin
+                Value::Null,                         // typmodout
+                Value::Null,                         // typanalyze
+                Value::build_text("i"),              // typalign
+                Value::build_text("p"),              // typstorage
+                Value::from_i64(0),                  // typnotnull
+                Value::from_i64(0),                  // typbasetype
+                Value::from_i64(-1),                 // typtypmod
+                Value::from_i64(0),                  // typndims
+                Value::from_i64(0),                  // typcollation
+                Value::Null,                         // typdefaultbin
+                Value::Null,                         // typdefault
+                Value::Null,                         // typacl
             ]);
         }
     }
@@ -2391,14 +2395,14 @@ impl PgConstraintCursor {
         let tbl_oid_map = table_oid_map(&schema);
 
         // Build index_name -> index_oid map (same OID assignment as pg_class/pg_index)
-        let mut index_oid_map: HashMap<String, i64> = HashMap::default();
+        let mut index_oid_map: HashMap<&str, i64> = HashMap::default();
         let mut next_index_oid = USER_TABLE_OID_START + num_tables;
         for (table_name, _) in &tables {
             for idx in schema.get_indices(table_name) {
                 if idx.ephemeral {
                     continue;
                 }
-                index_oid_map.insert(idx.name.clone(), next_index_oid);
+                index_oid_map.insert(idx.name.as_str(), next_index_oid);
                 next_index_oid += 1;
             }
         }
@@ -2547,7 +2551,10 @@ impl PgConstraintCursor {
                     .collect::<Vec<_>>()
                     .join(" ");
 
-                let confrelid = tbl_oid_map.get(&fk.parent_table).copied().unwrap_or(0);
+                let confrelid = tbl_oid_map
+                    .get(fk.parent_table.as_str())
+                    .copied()
+                    .unwrap_or(0);
 
                 let confkey: String = fk
                     .parent_columns
@@ -3329,7 +3336,7 @@ impl PgGetTableDefCursor {
                 continue;
             };
 
-            let postgres_ddl = match sql_map.get(table_name) {
+            let postgres_ddl = match sql_map.get(table_name.as_str()) {
                 Some(schema_sql) => decode_stored_pg_schema_sql(schema_sql)
                     .map(str::to_string)
                     .unwrap_or_else(|| self.convert_to_postgres_ddl(schema_sql)),
@@ -3338,7 +3345,7 @@ impl PgGetTableDefCursor {
 
             self.rows.push(vec![
                 Value::Text("public".into()),
-                Value::Text(table_name.clone().into()),
+                Value::Text(table_name.as_str().into()),
                 Value::Text(postgres_ddl.into()),
             ]);
         }
@@ -3620,7 +3627,27 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn catalog_table_name_lookup_is_case_insensitive() {
+        for name in CATALOG_TABLE_NAMES {
+            assert!(is_catalog_table_name(name));
+            assert!(is_catalog_table_name(&name.to_ascii_uppercase()));
+        }
+        assert!(!is_catalog_table_name("pg_not_a_catalog_table"));
+    }
 
+    #[test]
+    fn catalog_table_names_follow_identifier_sort_order() {
+        for names in CATALOG_TABLE_NAMES.windows(2) {
+            assert!(
+                IdentKeyStr::new(names[0]) < names[1],
+                "{} must sort before {}",
+                names[0],
+                names[1]
+            );
+        }
+    }
+
+    #[test]
     fn test_pg_namespace_query() {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");

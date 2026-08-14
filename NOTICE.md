@@ -41,6 +41,11 @@ This project depends on libm, distributed by the rust-lang project:
 * License: licenses/extensions/libm-mit-license.md (MIT License)
 * Homepage: https://github.com/rust-lang/libm
 
+This project depends on identstr, distributed by the identstr authors:
+
+* License: licenses/sqlite/parser/identstr-mit-license.md (MIT License)
+* Homepage: https://github.com/themixednuts/identstr
+
 This project includes a vendored copy of crossbeam-skiplist (in `core/skiplist`), distributed by the Crossbeam project developers:
 
 * License: licenses/core/crossbeam-skiplist-apache-license.md (Apache License v2.0)

@@ -407,7 +407,7 @@ pub(crate) fn capture_custom_types(
             .type_registry
             .iter()
             .filter(|(_, td)| !td.is_builtin)
-            .map(|(name, td)| (name.clone(), td.clone()))
+            .map(|(name, td)| (name.to_string(), td.clone()))
             .collect()
     })
 }
@@ -559,7 +559,9 @@ pub(crate) fn vacuum_target_build_step(
                 if !config.source_custom_types.is_empty() {
                     state.target_conn.with_schema_mut(|target_schema| {
                         for (name, td) in &config.source_custom_types {
-                            target_schema.type_registry.insert(name.clone(), td.clone());
+                            target_schema
+                                .type_registry
+                                .insert(crate::IdentKey::from_unquoted(name), td.clone());
                         }
                     })?;
                 }
@@ -1611,7 +1613,7 @@ fn install_mvcc_state_after_vacuum_commit(
 /// state machine.
 fn capture_target_metadata(
     temp_db: &VacuumTempDb,
-    source_sequences: FxHashMap<String, Arc<crate::schema::Sequence>>,
+    source_sequences: FxHashMap<crate::IdentKey, Arc<crate::schema::Sequence>>,
 ) -> Result<VacuumCommittedImageMeta> {
     let temp_conn = &temp_db.conn;
     let temp_pager = temp_conn.get_pager();
@@ -2884,10 +2886,10 @@ mod tests {
         assert_eq!(committed.header.write_version, mvcc_version);
         assert_eq!(committed.schema.schema_version, 42);
         assert!(
-            committed.schema.tables.contains_key("generate_series"),
+            committed.schema.get_table("generate_series").is_some(),
             "captured schema must retain built-in table-valued functions"
         );
-        let table_root = match committed.schema.tables.get("t").expect("table t").as_ref() {
+        let table_root = match committed.schema.get_table("t").expect("table t").as_ref() {
             crate::schema::Table::BTree(btree) => btree.root_page,
             _ => panic!("expected btree table"),
         };
@@ -2895,7 +2897,7 @@ mod tests {
         let index_root = committed
             .schema
             .indexes
-            .get("t")
+            .get(crate::IdentKeyStr::new("t"))
             .and_then(|indexes| indexes.front())
             .map(|index| index.root_page)
             .expect("index idx_t_v");

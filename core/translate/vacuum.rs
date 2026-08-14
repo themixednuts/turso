@@ -108,7 +108,7 @@ mod tests {
 
     #[test]
     fn test_extract_path_from_identifier() {
-        let expr = Expr::Id(Name::exact("myfile".to_string()));
+        let expr = Expr::Id(Name::exact_ref("myfile"));
         let path = extract_path_from_expr(&expr).unwrap();
         assert_eq!(path, "myfile");
     }

@@ -1454,6 +1454,44 @@ expect {
     42
 }
 
+@cross-check-integrity
+test alter-table-rename-column-trigger-update-of-uppercase-target {
+    CREATE TABLE rename_lower (a, b);
+    INSERT INTO rename_lower VALUES (1, 2);
+    CREATE TABLE rename_lower_log (value);
+    CREATE TRIGGER rename_lower_trigger AFTER UPDATE OF b ON RENAME_LOWER BEGIN
+        INSERT INTO rename_lower_log VALUES (NEW.b);
+    END;
+    ALTER TABLE rename_lower RENAME COLUMN b TO c;
+    SELECT instr(sql, 'UPDATE OF c') > 0, instr(sql, 'NEW.c') > 0
+    FROM sqlite_schema WHERE name = 'rename_lower_trigger';
+    UPDATE rename_lower SET c = 42;
+    SELECT * FROM rename_lower_log;
+}
+expect {
+    1|1
+    42
+}
+
+@cross-check-integrity
+test alter-table-rename-column-trigger-update-of-lowercase-target {
+    CREATE TABLE RENAME_UPPER (a, b);
+    INSERT INTO RENAME_UPPER VALUES (1, 2);
+    CREATE TABLE rename_upper_log (value);
+    CREATE TRIGGER rename_upper_trigger AFTER UPDATE OF b ON rename_upper BEGIN
+        INSERT INTO rename_upper_log VALUES (NEW.b);
+    END;
+    ALTER TABLE RENAME_UPPER RENAME COLUMN b TO c;
+    SELECT instr(sql, 'UPDATE OF c') > 0, instr(sql, 'NEW.c') > 0
+    FROM sqlite_schema WHERE name = 'rename_upper_trigger';
+    UPDATE RENAME_UPPER SET c = 42;
+    SELECT * FROM rename_upper_log;
+}
+expect {
+    1|1
+    42
+}
+
 # Verify trigger body UPDATE SET column names and WHERE refs updated
 @cross-check-integrity
 test alter-table-rename-column-trigger-body-update-refs {
@@ -2616,6 +2654,32 @@ test fail-drop-column-trigger-select-table-alias {
 }
 expect error {
     error in trigger alias_drop_trigger after drop column: no such column: target_alias.dropped_col
+}
+
+@cross-check-integrity
+test fail-drop-column-trigger-select-uppercase-table-alias {
+    CREATE TABLE uppercase_alias_drop_target (keep_col, dropped_col);
+    CREATE TRIGGER uppercase_alias_drop_trigger AFTER UPDATE ON uppercase_alias_drop_target BEGIN
+        SELECT X.keep_col, X.dropped_col
+        FROM uppercase_alias_drop_target AS X;
+    END;
+    ALTER TABLE uppercase_alias_drop_target DROP COLUMN dropped_col;
+}
+expect error {
+    error in trigger uppercase_alias_drop_trigger after drop column: no such column: X.dropped_col
+}
+
+@cross-check-integrity
+test fail-drop-column-trigger-select-uppercase-doubly-qualified-table {
+    CREATE TABLE uppercase_qualified_drop_target (keep_col, dropped_col);
+    CREATE TRIGGER uppercase_qualified_drop_trigger AFTER UPDATE ON uppercase_qualified_drop_target BEGIN
+        SELECT MAIN.UPPERCASE_QUALIFIED_DROP_TARGET.dropped_col
+        FROM uppercase_qualified_drop_target;
+    END;
+    ALTER TABLE uppercase_qualified_drop_target DROP COLUMN dropped_col;
+}
+expect error {
+    error in trigger uppercase_qualified_drop_trigger after drop column: no such column: MAIN.UPPERCASE_QUALIFIED_DROP_TARGET.dropped_col
 }
 
 # The same check must include aliases introduced by UPDATE FROM.

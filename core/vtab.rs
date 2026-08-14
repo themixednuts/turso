@@ -85,7 +85,7 @@ impl VirtualTable {
     }
 
     pub(crate) fn function(name: &str, syms: &SymbolTable) -> crate::Result<Arc<VirtualTable>> {
-        let module = syms.vtab_modules.get(name);
+        let module = syms.vtab_modules.get(crate::IdentKeyStr::new(name));
         let (vtab_type, schema) = if module.is_some() {
             ExtVirtualTable::create(name, module, Vec::new(), VTabKind::TableValuedFunction)
                 .map(|(vtab, columns)| (VirtualTableType::External(vtab), columns))?
@@ -113,7 +113,7 @@ impl VirtualTable {
         args: Vec<turso_ext::Value>,
         syms: &SymbolTable,
     ) -> crate::Result<Arc<VirtualTable>> {
-        let module = syms.vtab_modules.get(module_name);
+        let module = syms.vtab_modules.get(crate::IdentKeyStr::new(module_name));
         let (table, schema) =
             ExtVirtualTable::create(module_name, module, args, VTabKind::VirtualTable)?;
         let vtab = VirtualTable {

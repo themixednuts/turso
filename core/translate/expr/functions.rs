@@ -223,20 +223,23 @@ pub(super) fn translate_sequence_function(
     let seq_name_raw = extract_string_literal(&args[0])?;
     let (database_id, normalized_name) = if let Some((schema, name)) = seq_name_raw.split_once('.')
     {
-        let schema_norm = normalize_ident(schema);
-        let db_id = match schema_norm.as_str() {
-            "main" => crate::MAIN_DB_ID,
-            "temp" => crate::TEMP_DB_ID,
+        let schema_name: &crate::IdentKeyStr = crate::IdentKeyStr::new(schema);
+        let db_id = match schema_name {
+            name if name == "main" => crate::MAIN_DB_ID,
+            name if name == "temp" => crate::TEMP_DB_ID,
             _ => resolver
-                .get_attached_database(&schema_norm)
+                .get_attached_database(schema)
                 .map(|(idx, _)| idx)
                 .ok_or_else(|| {
-                    LimboError::InvalidArgument(format!("no such database: {schema_norm}"))
+                    LimboError::InvalidArgument(format!("no such database: {schema}"))
                 })?,
         };
-        (db_id, normalize_ident(name))
+        (db_id, crate::IdentKey::from_unquoted(name))
     } else {
-        (crate::MAIN_DB_ID, normalize_ident(&seq_name_raw))
+        (
+            crate::MAIN_DB_ID,
+            crate::IdentKey::from_unquoted(&seq_name_raw),
+        )
     };
 
     let backing_table_name =
@@ -313,7 +316,7 @@ pub(super) fn translate_sequence_function(
         program.preassign_label_to_next_insn(loop_label);
         program.emit_insn(Insn::Delete {
             cursor_id,
-            table_name: normalized_name.clone(),
+            table_name: normalized_name.to_string(),
             // Sequence storage is internal bookkeeping, not a SQL row change.
             is_part_of_update: true,
         });
@@ -356,7 +359,7 @@ pub(super) fn translate_sequence_function(
             key_reg: start_reg + 1,
             record_reg,
             flag: InsertFlags::new().require_seek().skip_all_change_counts(),
-            table_name: normalized_name.clone(),
+            table_name: normalized_name.to_string(),
         });
         program.emit_insn(Insn::SetSequenceCurrval {
             seq_name_reg: start_reg,

@@ -27,7 +27,7 @@ use crate::{
         SchemaObjectType,
     },
     storage::pager::CreateBTreeFlags,
-    util::{escape_sql_string_literal, normalize_ident, PRIMARY_KEY_AUTOMATIC_INDEX_NAME_PREFIX},
+    util::{escape_sql_string_literal, PRIMARY_KEY_AUTOMATIC_INDEX_NAME_PREFIX},
     vdbe::{
         builder::{CursorType, ProgramBuilder},
         insn::{IdxInsertFlags, Insn, RegisterOrLiteral, SorterOpenData},
@@ -110,8 +110,8 @@ pub fn translate_create_index(
     } else {
         resolver.resolve_existing_table_database_id(original_tbl_name.as_str())?
     };
-    let idx_name = normalize_ident(original_idx_name.name.as_str());
-    let tbl_name = normalize_ident(original_tbl_name.as_str());
+    let idx_name = original_idx_name.name.to_key();
+    let tbl_name = original_tbl_name.to_key();
 
     validate(
         &tbl_name,
@@ -194,11 +194,14 @@ pub fn translate_create_index(
         );
     }
 
+    let idx_name = String::from(idx_name);
+    let tbl_name = String::from(tbl_name);
+
     let mut index_method = None;
     if let Some(using) = &using {
         let index_modules = &resolver.symbol_table.index_methods;
         let using = using.as_str();
-        let index_module = index_modules.get(using);
+        let index_module = index_modules.get(crate::IdentKeyStr::new(using));
         if index_module.is_none() {
             crate::bail_parse_error!("Error: unknown module name '{}'", using);
         }
@@ -343,7 +346,7 @@ fn emit_refill_index(
         column_count: tbl.columns().len(),
     }));
     let columns = &idx.columns;
-    let tbl_name = normalize_ident(tbl.name.as_str());
+    let tbl_name = tbl.name.clone();
 
     let mut table_references = TableReferences::new(
         vec![JoinedTable {
@@ -700,7 +703,7 @@ fn resolve_reindex_targets(
         return Ok(collect_all_reindex_targets(resolver, connection));
     };
 
-    let normalized_name = normalize_ident(name.name.as_str());
+    let normalized_name = name.name.to_key();
     if name.db_name.is_none() {
         if let Ok(collation) = CollationSeq::new(&normalized_name) {
             return Ok(collect_reindex_targets_by_collation(
@@ -818,7 +821,7 @@ fn find_reindex_table_in_db(
         };
         let targets = schema
             .indexes
-            .get(&normalize_ident(table.name.as_str()))
+            .get(crate::IdentKeyStr::new(table.name.as_str()))
             .map(|indexes| {
                 indexes
                     .iter()
@@ -1001,8 +1004,8 @@ fn resolve_index_column<'a>(
         // SQLite interprets single-quoted strings as column names in index expressions
         // (backwards compatibility quirk). We do the same. The string includes quotes.
         Expr::Literal(ast::Literal::String(col_name)) => {
-            let unquoted = col_name.trim_matches('\'');
-            table.get_column(unquoted)?
+            let key: crate::IdentKey = crate::IdentKey::new(col_name);
+            table.get_column(key.as_str())?
         }
         Expr::Qualified(_, col) | Expr::DoublyQualified(_, _, col) => {
             table.get_column(col.as_str())?
@@ -1038,18 +1041,17 @@ fn validate_index_expression(expr: &Expr, table: &BTreeTable) -> bool {
         return false;
     }
 
-    let tbl_norm = normalize_ident(table.name.as_str());
+    let tbl_norm: &crate::IdentKeyStr = crate::IdentKeyStr::new(table.name.as_str());
     let has_col = |name: &str| {
-        let n = normalize_ident(name);
+        let name: &crate::IdentKeyStr = crate::IdentKeyStr::new(name);
         table
             .columns()
             .iter()
-            .any(|c| c.name.as_ref().is_some_and(|cn| normalize_ident(cn) == n))
+            .any(|c| c.name.as_ref().is_some_and(|cn| name == cn))
     };
-    let is_tbl = |ns: &str| normalize_ident(ns).eq_ignore_ascii_case(&tbl_norm);
+    let is_tbl = |ns: &str| tbl_norm == ns;
     let is_deterministic_fn = |name: &str, args: &[Box<Expr>]| {
-        let n = normalize_ident(name);
-        Func::resolve_function(&n, args.len())
+        Func::resolve_function(name, args.len())
             .is_ok_and(|f| f.is_some_and(|f| is_deterministic_schema_function_call(&f, args)))
     };
 
@@ -1167,7 +1169,7 @@ fn emit_index_column_value_from_cursor(
 
 pub fn resolve_index_method_parameters(
     parameters: Vec<(turso_parser::ast::Name, Box<Expr>)>,
-) -> crate::Result<HashMap<String, crate::Value>> {
+) -> crate::Result<HashMap<crate::IdentKey, crate::Value>> {
     let mut resolved = HashMap::default();
     for (key, value) in parameters {
         let value = match *value {
@@ -1194,7 +1196,9 @@ pub fn resolve_index_method_parameters(
             },
             _ => bail_parse_error!("parameters must be constant literals"),
         };
-        resolved.insert(key.as_str().to_string(), value);
+        if resolved.insert(key.to_key(), value).is_some() {
+            bail_parse_error!("duplicate index method parameter '{}'", key.as_str());
+        }
     }
     Ok(resolved)
 }
@@ -1206,7 +1210,7 @@ pub fn translate_drop_index(
     program: &mut ProgramBuilder,
 ) -> crate::Result<()> {
     let database_id = resolver.resolve_existing_index_database_id(qualified_name)?;
-    let idx_name = normalize_ident(qualified_name.name.as_str());
+    let idx_name = qualified_name.name.to_key();
     let opts = ProgramBuilderOpts::new(5, 40, 5);
     program.extend(&opts);
 
@@ -1252,6 +1256,8 @@ pub fn translate_drop_index(
             ));
         }
     }
+
+    let idx_name = String::from(idx_name);
 
     let cdc_table = prepare_cdc_if_necessary(program, resolver.schema(), Some(SQLITE_TABLEID))?;
 
@@ -1424,7 +1430,7 @@ pub fn translate_optimize(
 
     if let Some(name) = idx_name {
         // Optimize a specific index
-        let idx_name = normalize_ident(name.name.as_str());
+        let idx_name = name.name.to_key();
         let database_id = resolver.resolve_existing_index_database_id(&name)?;
         let mut found = false;
 
@@ -1490,8 +1496,28 @@ pub fn translate_optimize(
 
 #[cfg(test)]
 mod tests {
-    use super::canonical_create_index_sql;
+    use super::{canonical_create_index_sql, resolve_index_method_parameters};
     use turso_parser::{ast, parser::Parser};
+
+    #[test]
+    fn index_method_parameters_reject_duplicate_identifier_keys() {
+        let parameters = vec![
+            (
+                ast::Name::exact_ref("Tokenizer"),
+                Box::new(ast::Expr::Literal(ast::Literal::Null)),
+            ),
+            (
+                ast::Name::from_string("\"TOKENIZER\""),
+                Box::new(ast::Expr::Literal(ast::Literal::Null)),
+            ),
+        ];
+
+        let error = resolve_index_method_parameters(parameters).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("duplicate index method parameter"));
+    }
 
     #[test]
     fn canonical_create_index_sql_drops_schema_qualifier_from_index_name_only() {

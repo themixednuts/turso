@@ -3,6 +3,8 @@ use clap_complete::{ArgValueCompleter, PathCompleter};
 use std::{fs::File, io::Write, path::PathBuf, sync::Arc};
 use turso_core::{Connection, LimboError};
 
+type IdentKey = identstr::Key<identstr::policy::Ascii>;
+
 #[derive(Debug, Clone, Args)]
 pub struct ImportArgs {
     /// Use , and \n as column and row separators
@@ -87,7 +89,7 @@ impl<'a> ImportFile<'a> {
             if let Some(Ok(header)) = records.next() {
                 let columns = header
                     .iter()
-                    .map(normalize_ident)
+                    .map(|identifier| String::from(IdentKey::new(identifier)))
                     .collect::<Vec<_>>()
                     .join(", ");
                 let create_table = format!("CREATE TABLE {} ({});", args.table, columns);
@@ -258,20 +260,4 @@ impl<'a> ImportFile<'a> {
             );
         }
     }
-}
-
-// https://sqlite.org/lang_keywords.html
-const QUOTE_PAIRS: &[(char, char)] = &[('"', '"'), ('[', ']'), ('`', '`')];
-
-pub fn normalize_ident(identifier: &str) -> String {
-    let quote_pair = QUOTE_PAIRS
-        .iter()
-        .find(|&(start, end)| identifier.starts_with(*start) && identifier.ends_with(*end));
-
-    if let Some(&(_, _)) = quote_pair {
-        &identifier[1..identifier.len() - 1]
-    } else {
-        identifier
-    }
-    .to_lowercase()
 }
