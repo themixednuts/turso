@@ -212,7 +212,7 @@ pub fn rewrite_value_to_column(expr: &ast::Expr, col_name: &str) -> Box<ast::Exp
     let _ = walk_expr_mut(&mut cloned, &mut |e| {
         if let ast::Expr::Id(name) = e {
             if name.as_str().eq_ignore_ascii_case("value") {
-                *e = ast::Expr::Id(ast::Name::exact_ref(col_name));
+                *e = ast::Expr::Id(ast::Name::from_unquoted(col_name));
             }
         }
         Ok(WalkControl::Continue)
@@ -3670,7 +3670,7 @@ impl BTreeTable {
                     sql.push(' ');
                     if let Some(name) = &check_constraint.name {
                         sql.push_str("CONSTRAINT ");
-                        sql.push_str(&Name::exact_ref(name).as_ident());
+                        sql.push_str(&Name::from_unquoted(name).as_ident());
                         sql.push(' ');
                     }
                     sql.push_str(&check_constraint.sql());
@@ -3744,7 +3744,7 @@ impl BTreeTable {
             sql.push_str(", ");
             if let Some(name) = &check_constraint.name {
                 sql.push_str("CONSTRAINT ");
-                sql.push_str(&Name::exact_ref(name).as_ident());
+                sql.push_str(&Name::from_unquoted(name).as_ident());
                 sql.push(' ');
             }
             sql.push_str(&check_constraint.sql());
@@ -4196,7 +4196,7 @@ pub fn render_gencol_expr_sql_with_new_names(expr: &Expr, columns: &[Column]) ->
             if table.is_self_table() {
                 if let Some(col) = columns.get(*column) {
                     if let Some(name) = col.name.as_ref() {
-                        *e = Expr::Id(Name::exact_ref(name));
+                        *e = Expr::Id(Name::from_unquoted(name));
                     }
                 }
             }
@@ -4489,7 +4489,7 @@ pub fn create_table(tbl_name: &str, body: &CreateTableBody, root_page: i64) -> R
                         let col_name = match expr {
                             Expr::Id(id) => String::from(id.to_key()),
                             Expr::Literal(Literal::String(value)) => {
-                                String::from(IdentKey::new(value))
+                                String::from(ast::Name::new(value).into_key())
                             }
                             expr => {
                                 bail_parse_error!("unsupported primary key expression: {}", expr)
@@ -4520,7 +4520,7 @@ pub fn create_table(tbl_name: &str, body: &CreateTableBody, root_page: i64) -> R
                         let col_name = match expr {
                             Expr::Id(id) => String::from(id.to_key()),
                             Expr::Literal(Literal::String(value)) => {
-                                String::from(IdentKey::new(value))
+                                String::from(ast::Name::new(value).into_key())
                             }
                             expr => {
                                 bail_parse_error!("unsupported unique key expression: {}", expr)
@@ -6127,7 +6127,7 @@ impl Index {
                 .filter(|(_, table)| {
                     table
                         .btree()
-                        .is_some_and(|bt| *IdentKeyStr::new(&bt.name) == self.table_name)
+                        .is_some_and(|bt| IdentKeyStr::new(&bt.name) == self.table_name.as_str())
                 })
                 .map(|(identifier, _)| identifier);
             let target = matches.next().cloned();
@@ -6142,7 +6142,7 @@ impl Index {
             walk_expr_mut(&mut expr, &mut |e: &mut Expr| {
                 if let Expr::Qualified(ns, _) | Expr::DoublyQualified(_, ns, _) = e {
                     if ns == &self.table_name {
-                        *ns = Name::exact_ref(&identifier);
+                        *ns = Name::from_unquoted(&identifier);
                     }
                 }
                 Ok(WalkControl::Continue)
@@ -6211,7 +6211,7 @@ mod tests {
         schema.add_trigger(Trigger::new(
             "tr".to_owned(),
             String::new(),
-            Name::from_string(r#""MixedCase""#),
+            Name::new(r#""MixedCase""#),
             None,
             ast::TriggerEvent::Insert,
             false,

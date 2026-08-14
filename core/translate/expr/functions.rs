@@ -223,16 +223,16 @@ pub(super) fn translate_sequence_function(
     let seq_name_raw = extract_string_literal(&args[0])?;
     let (database_id, normalized_name) = if let Some((schema, name)) = seq_name_raw.split_once('.')
     {
-        let schema_name: &crate::IdentKeyStr = crate::IdentKeyStr::new(schema);
-        let db_id = match schema_name {
-            name if name == "main" => crate::MAIN_DB_ID,
-            name if name == "temp" => crate::TEMP_DB_ID,
-            _ => resolver
+        let schema_name = crate::IdentKeyStr::new(schema);
+        let db_id = if schema_name == "main" {
+            crate::MAIN_DB_ID
+        } else if schema_name == "temp" {
+            crate::TEMP_DB_ID
+        } else {
+            resolver
                 .get_attached_database(schema)
                 .map(|(idx, _)| idx)
-                .ok_or_else(|| {
-                    LimboError::InvalidArgument(format!("no such database: {schema}"))
-                })?,
+                .ok_or_else(|| LimboError::InvalidArgument(format!("no such database: {schema}")))?
         };
         (db_id, crate::IdentKey::from_unquoted(name))
     } else {

@@ -11,7 +11,7 @@ use turso_parser::ast::Name;
 pub fn translate_savepoint(program: &mut ProgramBuilder, name: Name) -> Result<()> {
     program.emit_insn(Insn::Savepoint {
         op: SavepointOp::Begin,
-        name: String::from(name.to_key()),
+        name: name.into_key(),
     });
     Ok(())
 }
@@ -20,7 +20,7 @@ pub fn translate_savepoint(program: &mut ProgramBuilder, name: Name) -> Result<(
 pub fn translate_release(program: &mut ProgramBuilder, name: Name) -> Result<()> {
     program.emit_insn(Insn::Savepoint {
         op: SavepointOp::Release,
-        name: String::from(name.to_key()),
+        name: name.into_key(),
     });
     Ok(())
 }
@@ -34,7 +34,7 @@ pub fn translate_rollback(
     if let Some(savepoint_name) = savepoint_name {
         program.emit_insn(Insn::Savepoint {
             op: SavepointOp::RollbackTo,
-            name: String::from(savepoint_name.to_key()),
+            name: savepoint_name.into_key(),
         });
     } else {
         program.emit_insn(Insn::AutoCommit {

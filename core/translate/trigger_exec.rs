@@ -560,7 +560,7 @@ fn execute_trigger_commands(
     } else {
         resolver
             .get_database_name_by_index(database_id)
-            .map(ast::Name::exact)
+            .map(ast::Name::from_unquoted)
     };
     // Parameter indices are allocated on demand during the AST rewrite.
     // Only columns actually referenced in the trigger body get a parameter,

@@ -1442,7 +1442,7 @@ fn parse_field_weights(
         let weight_str = weight_str.trim();
 
         // Validate column exists in index
-        let col_key = IdentKey::new(col_name);
+        let col_key = turso_parser::ast::Name::new(col_name).into_key();
         if !valid_columns.contains(&col_key) {
             return Err(LimboError::ParseError(format!(
                 "unknown column '{}' in weights. Valid columns: {}",

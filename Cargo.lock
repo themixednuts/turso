@@ -7284,7 +7284,6 @@ dependencies = [
  "ctrlc",
  "dirs 5.0.1",
  "env_logger",
- "identstr",
  "include_dir",
  "itertools 0.14.0",
  "libc",

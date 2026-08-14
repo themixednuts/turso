@@ -1008,9 +1008,9 @@ mod tests {
         use turso_parser::ast;
 
         let generated_expr = ast::Expr::Binary(
-            Box::new(ast::Expr::Id(ast::Name::from_string("a"))),
+            Box::new(ast::Expr::Id(ast::Name::new("a"))),
             ast::Operator::Add,
-            Box::new(ast::Expr::Id(ast::Name::from_string("b"))),
+            Box::new(ast::Expr::Id(ast::Name::new("b"))),
         );
         Table {
             name: "t".to_string(),

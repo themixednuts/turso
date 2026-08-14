@@ -3187,8 +3187,13 @@ impl Database {
 }
 
 // Optimized for fast get() operations and supports unlimited attached databases.
+pub(crate) struct DatabaseCatalogEntry {
+    pub(crate) index: usize,
+    pub(crate) name: String,
+}
+
 pub(crate) struct DatabaseCatalog {
-    pub(crate) name_to_index: HashMap<crate::IdentKey, usize>,
+    pub(crate) name_to_entry: HashMap<crate::IdentKey, DatabaseCatalogEntry>,
     allocated: Vec<u64>,
     pub(crate) index_to_data: HashMap<usize, (Arc<Database>, Arc<Pager>)>,
 }
@@ -3197,7 +3202,7 @@ pub(crate) struct DatabaseCatalog {
 impl DatabaseCatalog {
     pub(crate) fn new() -> Self {
         Self {
-            name_to_index: HashMap::default(),
+            name_to_entry: HashMap::default(),
             index_to_data: HashMap::default(),
             allocated: vec![3], // 0 | 1, as those are reserved for main and temp
         }
@@ -3210,19 +3215,19 @@ impl DatabaseCatalog {
     }
 
     pub(crate) fn get_name_by_index(&self, index: usize) -> Option<String> {
-        self.name_to_index
-            .iter()
-            .find(|(_, &idx)| idx == index)
-            .map(|(name, _)| name.to_string())
+        self.name_to_entry
+            .values()
+            .find(|entry| entry.index == index)
+            .map(|entry| entry.name.clone())
     }
 
     pub(crate) fn get_database_by_name(&self, s: &str) -> Option<(usize, Arc<Database>)> {
-        match self.name_to_index.get(crate::IdentKeyStr::new(s)) {
+        match self.name_to_entry.get(crate::IdentKeyStr::new(s)) {
             None => None,
-            Some(idx) => self
+            Some(entry) => self
                 .index_to_data
-                .get(idx)
-                .map(|(db, _pager)| (*idx, db.clone())),
+                .get(&entry.index)
+                .map(|(db, _pager)| (entry.index, db.clone())),
         }
     }
 
@@ -3236,7 +3241,7 @@ impl DatabaseCatalog {
 
     fn add(&mut self, s: &str) -> usize {
         let key = crate::IdentKey::from_unquoted(s);
-        match self.name_to_index.entry(key) {
+        match self.name_to_entry.entry(key) {
             Entry::Occupied(_) => {
                 turso_assert_unreachable!("lib: database name already exists in catalog", {
                     "name": s
@@ -3244,7 +3249,10 @@ impl DatabaseCatalog {
             }
             Entry::Vacant(entry) => {
                 let index = Self::allocate_index(&mut self.allocated);
-                entry.insert(index);
+                entry.insert(DatabaseCatalogEntry {
+                    index,
+                    name: s.to_owned(),
+                });
                 index
             }
         }
@@ -3257,12 +3265,12 @@ impl DatabaseCatalog {
     }
 
     pub(crate) fn remove(&mut self, s: &str) -> Option<usize> {
-        if let Some(index) = self.name_to_index.remove(crate::IdentKeyStr::new(s)) {
+        if let Some(entry) = self.name_to_entry.remove(crate::IdentKeyStr::new(s)) {
             // Should be impossible to remove main or temp.
-            turso_assert_greater_than_or_equal!(index, 2);
-            self.deallocate_index(index);
-            self.index_to_data.remove(&index);
-            Some(index)
+            turso_assert_greater_than_or_equal!(entry.index, 2);
+            self.deallocate_index(entry.index);
+            self.index_to_data.remove(&entry.index);
+            Some(entry.index)
         } else {
             None
         }

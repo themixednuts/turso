@@ -22,6 +22,35 @@ expect {
 }
 
 @cross-check-integrity
+test alter-table-rename-preserves-name-spelling {
+    CREATE TABLE MixedSource (id INTEGER PRIMARY KEY, code TEXT UNIQUE);
+    ALTER TABLE MixedSource RENAME TO MixedTarget;
+    SELECT type, name, tbl_name FROM sqlite_schema WHERE tbl_name = 'MixedTarget' ORDER BY type, name;
+    SELECT name FROM pragma_index_list('MixedTarget') ORDER BY name;
+}
+expect {
+    index|sqlite_autoindex_MixedTarget_1|MixedTarget
+    table|MixedTarget|MixedTarget
+    sqlite_autoindex_MixedTarget_1
+}
+
+@cross-check-integrity
+test alter-table-chained-renames-preserve-name-spelling {
+    CREATE TABLE ChainSource (OldColumn TEXT);
+    CREATE TRIGGER ChainTrigger AFTER INSERT ON ChainSource BEGIN SELECT new.OldColumn; END;
+    ALTER TABLE ChainSource RENAME TO MixedTable;
+    ALTER TABLE MixedTable RENAME COLUMN OldColumn TO MixedColumn;
+    SELECT instr(sql, 'MixedTable') > 0,
+           instr(sql, 'MixedColumn') > 0,
+           instr(sql, 'mixedtable') = 0,
+           instr(sql, 'mixedcolumn') = 0
+    FROM sqlite_schema WHERE name = 'ChainTrigger' COLLATE NOCASE;
+}
+expect {
+    1|1|1|1
+}
+
+@cross-check-integrity
 test alter-table-rename-then-recreate-with-autoindex {
     CREATE TABLE new_t (a integer, b integer UNIQUE, PRIMARY KEY (a));
     ALTER TABLE new_t RENAME TO t;

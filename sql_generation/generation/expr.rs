@@ -241,7 +241,7 @@ impl Arbitrary for QualifiedName {
         // TODO: for now forego alias
         Self {
             db_name: None,
-            name: Name::from_string(&table.name),
+            name: Name::new(&table.name),
             alias: None,
         }
     }

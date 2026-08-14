@@ -169,7 +169,7 @@ pub use turso_macros::{
 };
 use turso_parser::{IdentKey, IdentKeyStr};
 pub use types::{IOResult, Value, ValueBlob, ValueRef};
-pub use util::IOExt;
+pub use util::{quote_identifier, IOExt};
 pub use vdbe::{
     builder::QueryMode, explain::EXPLAIN_COLUMNS, explain::EXPLAIN_QUERY_PLAN_COLUMNS,
     FromValueRow, PrepareContext, PreparedProgram, Program, Register,

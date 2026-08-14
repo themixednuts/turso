@@ -760,7 +760,7 @@ fn transform_match_to_fts_match(
                     args.push(rhs.clone());
 
                     let func_call = Expr::FunctionCall {
-                        name: Name::exact_ref("fts_match"),
+                        name: Name::from_unquoted("fts_match"),
                         distinctness: None,
                         args,
                         order_by: vec![],
@@ -4138,7 +4138,7 @@ mod tests {
 
     fn fn_call(name: &str, args: Vec<Expr>) -> Expr {
         Expr::FunctionCall {
-            name: Name::exact_ref(name),
+            name: Name::from_unquoted(name),
             distinctness: None,
             args: args.into_iter().map(Box::new).collect(),
             order_by: vec![],

@@ -17,7 +17,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::future::Future;
 use tracing::{instrument, Level};
 use turso_macros::match_ignore_ascii_case;
-use turso_parser::ast::{self, CreateTableBody, Expr, Literal, UnaryOperator};
+use turso_parser::ast::{self, CreateTableBody, Expr, Literal, Name, UnaryOperator};
 use turso_parser::parser::Parser;
 
 #[macro_export]
@@ -327,7 +327,7 @@ fn cmp_numeric_strings(num_str: &str, other: &str) -> bool {
 }
 
 pub fn check_ident_equivalency(ident1: &str, ident2: &str) -> bool {
-    IdentKey::new(ident1) == IdentKey::new(ident2)
+    Name::new(ident1) == Name::new(ident2)
 }
 
 /// Returns true if `sql` parses as a `CREATE VIRTUAL TABLE` statement.
@@ -2246,7 +2246,7 @@ pub fn rewrite_fk_parent_cols_if_self_ref(
     if clause.tbl_name.as_str().eq_ignore_ascii_case(table) {
         for c in &mut clause.columns {
             if c.col_name.as_str().eq_ignore_ascii_case(from) {
-                c.col_name = ast::Name::exact_ref(to);
+                c.col_name = ast::Name::from_unquoted(to);
             }
         }
     }
@@ -2263,13 +2263,13 @@ pub fn check_expr_references_column(expr: &ast::Expr, column: &crate::IdentKeySt
         }
         match e {
             ast::Expr::Id(name) | ast::Expr::Name(name) => {
-                if name.as_key_str() == column {
+                if name == column {
                     found = true;
                     return Ok(WalkControl::SkipChildren);
                 }
             }
             ast::Expr::Qualified(_, col) | ast::Expr::DoublyQualified(_, _, col) => {
-                if col.as_key_str() == column {
+                if col == column {
                     found = true;
                     return Ok(WalkControl::SkipChildren);
                 }
@@ -2294,13 +2294,13 @@ pub fn rename_identifiers(expr: &mut ast::Expr, from: &str, to: &str) {
                 ast::Expr::Id(ref name) | ast::Expr::Name(ref name)
                     if name.as_str().eq_ignore_ascii_case(from) =>
                 {
-                    *e = ast::Expr::Id(ast::Name::exact_ref(to));
+                    *e = ast::Expr::Id(ast::Name::from_unquoted(to));
                 }
                 ast::Expr::Qualified(ref tbl, ref col_name)
                     if col_name.as_str().eq_ignore_ascii_case(from) =>
                 {
                     let tbl = tbl.clone();
-                    *e = ast::Expr::Qualified(tbl, ast::Name::exact_ref(to));
+                    *e = ast::Expr::Qualified(tbl, ast::Name::from_unquoted(to));
                 }
                 _ => {}
             }
@@ -2380,7 +2380,7 @@ fn rename_identifiers_scoped_inner(
                 ast::Expr::Id(ref name) | ast::Expr::Name(ref name)
                     if rename_unqualified && name.as_str().eq_ignore_ascii_case(from) =>
                 {
-                    *e = ast::Expr::Id(ast::Name::exact_ref(to));
+                    *e = ast::Expr::Id(ast::Name::from_unquoted(to));
                 }
                 ast::Expr::Qualified(ref tbl, ref col_name)
                     if col_name.as_str().eq_ignore_ascii_case(from) =>
@@ -2395,7 +2395,7 @@ fn rename_identifiers_scoped_inner(
                     };
                     if should_rename {
                         let tbl = tbl.clone();
-                        *e = ast::Expr::Qualified(tbl, ast::Name::exact_ref(to));
+                        *e = ast::Expr::Qualified(tbl, ast::Name::from_unquoted(to));
                     }
                 }
                 _ => {}
@@ -3144,14 +3144,14 @@ mod rename_column_view {
 
         match expr {
             ast::Expr::Qualified(ns, col) => {
-                if col.as_key_str() != old_column_key {
+                if col != old_column_key {
                     return false;
                 }
                 let (source, local_ambiguous) =
                     resolve_qualified(sources, ns.as_key_str(), target_db_key);
                 if let Some(source) = source {
                     return apply_rename(source, &mut |name| {
-                        *col = ast::Name::exact(name);
+                        *col = ast::Name::from_unquoted(name);
                     });
                 }
                 if local_ambiguous {
@@ -3162,7 +3162,7 @@ mod rename_column_view {
                         resolve_qualified(scope, ns.as_key_str(), target_db_key);
                     if let Some(source) = source {
                         return apply_rename(source, &mut |name| {
-                            *col = ast::Name::exact(name);
+                            *col = ast::Name::from_unquoted(name);
                         });
                     }
                     if ambiguous {
@@ -3171,17 +3171,17 @@ mod rename_column_view {
                 }
             }
             ast::Expr::DoublyQualified(schema, ns, col) => {
-                if schema.as_key_str() != target_db_key {
+                if schema != target_db_key {
                     return false;
                 }
-                if col.as_key_str() != old_column_key {
+                if col != old_column_key {
                     return false;
                 }
                 let (source, local_ambiguous) =
                     resolve_qualified(sources, ns.as_key_str(), target_db_key);
                 if let Some(source) = source {
                     return apply_rename(source, &mut |name| {
-                        *col = ast::Name::exact(name);
+                        *col = ast::Name::from_unquoted(name);
                     });
                 }
                 if local_ambiguous {
@@ -3192,7 +3192,7 @@ mod rename_column_view {
                         resolve_qualified(scope, ns.as_key_str(), target_db_key);
                     if let Some(source) = source {
                         return apply_rename(source, &mut |name| {
-                            *col = ast::Name::exact(name);
+                            *col = ast::Name::from_unquoted(name);
                         });
                     }
                     if ambiguous {
@@ -3201,13 +3201,13 @@ mod rename_column_view {
                 }
             }
             ast::Expr::Id(col) | ast::Expr::Name(col) => {
-                if col.as_key_str() != old_column_key {
+                if col != old_column_key {
                     return false;
                 }
                 let (source, local_ambiguous) = resolve_unqualified(sources, col.as_key_str());
                 if let Some(source) = source {
                     return apply_rename(source, &mut |name| {
-                        *expr = ast::Expr::Id(ast::Name::exact(name));
+                        *expr = ast::Expr::Id(ast::Name::from_unquoted(name));
                     });
                 }
                 if local_ambiguous {
@@ -3217,7 +3217,7 @@ mod rename_column_view {
                     let (source, ambiguous) = resolve_unqualified(scope, col.as_key_str());
                     if let Some(source) = source {
                         return apply_rename(source, &mut |name| {
-                            *expr = ast::Expr::Id(ast::Name::exact(name));
+                            *expr = ast::Expr::Id(ast::Name::from_unquoted(name));
                         });
                     }
                     if ambiguous {
@@ -3288,8 +3288,8 @@ mod rename_column_view {
             .unwrap_or(new_column);
 
         for col in cols {
-            if col.as_key_str() == old_column_key {
-                *col = ast::Name::exact_ref(replacement);
+            if col == old_column_key {
+                *col = ast::Name::from_unquoted(replacement);
                 changed = true;
             }
         }
@@ -3454,7 +3454,7 @@ pub fn rewrite_check_expr_table_refs(expr: &mut ast::Expr, from: &str, to: &str)
                 ast::Expr::Qualified(tbl, col) => {
                     if tbl.as_str().eq_ignore_ascii_case(from) {
                         let col = col.clone();
-                        *e = ast::Expr::Qualified(ast::Name::exact_ref(to), col);
+                        *e = ast::Expr::Qualified(ast::Name::from_unquoted(to), col);
                     }
                 }
                 ast::Expr::Exists(select) | ast::Expr::Subquery(select) => {
@@ -3465,7 +3465,7 @@ pub fn rewrite_check_expr_table_refs(expr: &mut ast::Expr, from: &str, to: &str)
                 }
                 ast::Expr::InTable { rhs, .. } => {
                     if rhs.name.as_str().eq_ignore_ascii_case(from) {
-                        rhs.name = ast::Name::exact_ref(to);
+                        rhs.name = ast::Name::from_unquoted(to);
                     }
                 }
                 _ => {}
@@ -3525,7 +3525,7 @@ pub fn rewrite_fk_parent_table_if_needed(
     new_tbl: &str,
 ) -> bool {
     if clause.tbl_name.as_str().eq_ignore_ascii_case(old_tbl) {
-        clause.tbl_name = ast::Name::exact_ref(new_tbl);
+        clause.tbl_name = ast::Name::from_unquoted(new_tbl);
         return true;
     }
     false
@@ -3563,7 +3563,7 @@ pub fn rewrite_trigger_cmd_table_refs(cmd: &mut ast::TriggerCmd, old_tbl: &str, 
             ..
         } => {
             if tbl_name.as_str().eq_ignore_ascii_case(old_tbl) {
-                *tbl_name = ast::Name::exact_ref(new_tbl);
+                *tbl_name = ast::Name::from_unquoted(new_tbl);
             }
             for set in sets {
                 rewrite_check_expr_table_refs(&mut set.expr, old_tbl, new_tbl);
@@ -3582,7 +3582,7 @@ pub fn rewrite_trigger_cmd_table_refs(cmd: &mut ast::TriggerCmd, old_tbl: &str, 
             ..
         } => {
             if tbl_name.as_str().eq_ignore_ascii_case(old_tbl) {
-                *tbl_name = ast::Name::exact_ref(new_tbl);
+                *tbl_name = ast::Name::from_unquoted(new_tbl);
             }
             rewrite_select_table_refs(select, old_tbl, new_tbl);
             if let Some(ref mut upsert) = upsert {
@@ -3594,7 +3594,7 @@ pub fn rewrite_trigger_cmd_table_refs(cmd: &mut ast::TriggerCmd, old_tbl: &str, 
             where_clause,
         } => {
             if tbl_name.as_str().eq_ignore_ascii_case(old_tbl) {
-                *tbl_name = ast::Name::exact_ref(new_tbl);
+                *tbl_name = ast::Name::from_unquoted(new_tbl);
             }
             if let Some(ref mut wc) = where_clause {
                 rewrite_check_expr_table_refs(wc, old_tbl, new_tbl);
@@ -3806,7 +3806,7 @@ fn collect_target_qualifiers(
     let ast::SelectTable::Table(name, alias, _) = st else {
         return;
     };
-    if name.name.as_key_str() != target_table {
+    if name.name != target_table {
         return;
     }
 
@@ -3967,7 +3967,7 @@ fn rename_result_identifiers_scoped(
                 ast::Expr::Id(ref name) | ast::Expr::Name(ref name)
                     if rename_unqualified && name.as_str().eq_ignore_ascii_case(from) =>
                 {
-                    *e = ast::Expr::Id(ast::Name::exact_ref(to));
+                    *e = ast::Expr::Id(ast::Name::from_unquoted(to));
                 }
                 ast::Expr::Qualified(ref tbl, ref col_name)
                     if col_name.as_str().eq_ignore_ascii_case(from) =>
@@ -3982,7 +3982,7 @@ fn rename_result_identifiers_scoped(
                     };
                     if should_rename {
                         let tbl = tbl.clone();
-                        *e = ast::Expr::Qualified(tbl, ast::Name::exact_ref(to));
+                        *e = ast::Expr::Qualified(tbl, ast::Name::from_unquoted(to));
                     }
                 }
                 _ => {}
@@ -4704,7 +4704,7 @@ fn rename_excluded_column_refs(expr: &mut ast::Expr, old_col: &str, new_col: &st
                 if ns.as_str().eq_ignore_ascii_case("excluded")
                     && col.as_str().eq_ignore_ascii_case(old_col)
                 {
-                    *col = ast::Name::exact_ref(new_col);
+                    *col = ast::Name::from_unquoted(new_col);
                 }
             }
             Ok(WalkControl::Continue)
@@ -4747,7 +4747,7 @@ fn rewrite_upsert_column_refs_scoped(
             if insert_targets_renamed_table {
                 for col_name in &mut set.col_names {
                     if col_name.as_str().eq_ignore_ascii_case(old_col) {
-                        *col_name = ast::Name::exact_ref(new_col);
+                        *col_name = ast::Name::from_unquoted(new_col);
                     }
                 }
             }
@@ -4792,7 +4792,7 @@ pub fn rewrite_trigger_cmd_column_refs(
                 for set in sets {
                     for col_name in &mut set.col_names {
                         if col_name.as_str().eq_ignore_ascii_case(old_col) {
-                            *col_name = ast::Name::exact_ref(new_col);
+                            *col_name = ast::Name::from_unquoted(new_col);
                         }
                     }
                     rename_identifiers_scoped(
@@ -4848,7 +4848,7 @@ pub fn rewrite_trigger_cmd_column_refs(
             if targets_renamed_table {
                 for col_name in col_names {
                     if col_name.as_str().eq_ignore_ascii_case(old_col) {
-                        *col_name = ast::Name::exact_ref(new_col);
+                        *col_name = ast::Name::from_unquoted(new_col);
                     }
                 }
             }
@@ -4934,7 +4934,7 @@ fn rewrite_one_select_table_refs(one: &mut ast::OneSelect, old_tbl: &str, new_tb
                     }
                     ast::ResultColumn::TableStar(ref mut name) => {
                         if name.as_str().eq_ignore_ascii_case(old_tbl) {
-                            *name = ast::Name::exact_ref(new_tbl);
+                            *name = ast::Name::from_unquoted(new_tbl);
                         }
                     }
                     ast::ResultColumn::Star => {}
@@ -4973,12 +4973,12 @@ fn rewrite_select_table_entry_table_refs(st: &mut ast::SelectTable, old_tbl: &st
     match st {
         ast::SelectTable::Table(ref mut name, _, _) => {
             if name.name.as_str().eq_ignore_ascii_case(old_tbl) {
-                name.name = ast::Name::exact_ref(new_tbl);
+                name.name = ast::Name::from_unquoted(new_tbl);
             }
         }
         ast::SelectTable::TableCall(ref mut name, ref mut args, _) => {
             if name.name.as_str().eq_ignore_ascii_case(old_tbl) {
-                name.name = ast::Name::exact_ref(new_tbl);
+                name.name = ast::Name::from_unquoted(new_tbl);
             }
             for arg in args {
                 rewrite_check_expr_table_refs(arg, old_tbl, new_tbl);
@@ -5484,9 +5484,9 @@ pub mod tests {
     #[test]
     fn test_expressions_equivalent_case_insensitive_functioncalls() {
         let func1 = Expr::FunctionCall {
-            name: Name::exact_ref("SUM"),
+            name: Name::from_unquoted("SUM"),
             distinctness: None,
-            args: vec![Expr::Id(Name::exact_ref("x")).into()],
+            args: vec![Expr::Id(Name::from_unquoted("x")).into()],
             order_by: vec![],
             within_group: vec![],
             filter_over: FunctionTail {
@@ -5495,9 +5495,9 @@ pub mod tests {
             },
         };
         let func2 = Expr::FunctionCall {
-            name: Name::exact_ref("sum"),
+            name: Name::from_unquoted("sum"),
             distinctness: None,
-            args: vec![Expr::Id(Name::exact_ref("x")).into()],
+            args: vec![Expr::Id(Name::from_unquoted("x")).into()],
             order_by: vec![],
             within_group: vec![],
             filter_over: FunctionTail {
@@ -5508,9 +5508,9 @@ pub mod tests {
         assert!(exprs_are_equivalent(&func1, &func2));
 
         let func3 = Expr::FunctionCall {
-            name: Name::exact_ref("SUM"),
+            name: Name::from_unquoted("SUM"),
             distinctness: Some(ast::Distinctness::Distinct),
-            args: vec![Expr::Id(Name::exact_ref("x")).into()],
+            args: vec![Expr::Id(Name::from_unquoted("x")).into()],
             order_by: vec![],
             within_group: vec![],
             filter_over: FunctionTail {
@@ -5524,9 +5524,9 @@ pub mod tests {
     #[test]
     fn test_expressions_equivalent_identical_fn_with_distinct() {
         let sum = Expr::FunctionCall {
-            name: Name::exact_ref("SUM"),
+            name: Name::from_unquoted("SUM"),
             distinctness: None,
-            args: vec![Expr::Id(Name::exact_ref("x")).into()],
+            args: vec![Expr::Id(Name::from_unquoted("x")).into()],
             order_by: vec![],
             within_group: vec![],
             filter_over: FunctionTail {
@@ -5535,9 +5535,9 @@ pub mod tests {
             },
         };
         let sum_distinct = Expr::FunctionCall {
-            name: Name::exact_ref("SUM"),
+            name: Name::from_unquoted("SUM"),
             distinctness: Some(ast::Distinctness::Distinct),
-            args: vec![Expr::Id(Name::exact_ref("x")).into()],
+            args: vec![Expr::Id(Name::from_unquoted("x")).into()],
             order_by: vec![],
             within_group: vec![],
             filter_over: FunctionTail {
@@ -5599,14 +5599,14 @@ pub mod tests {
     #[test]
     fn test_like_expressions_equivalent() {
         let expr1 = Expr::Like {
-            lhs: Box::new(Expr::Id(Name::exact_ref("name"))),
+            lhs: Box::new(Expr::Id(Name::from_unquoted("name"))),
             not: false,
             op: ast::LikeOperator::Like,
             rhs: Box::new(Expr::Literal(Literal::String("%john%".to_string()))),
             escape: Some(Box::new(Expr::Literal(Literal::String("\\".to_string())))),
         };
         let expr2 = Expr::Like {
-            lhs: Box::new(Expr::Id(Name::exact_ref("name"))),
+            lhs: Box::new(Expr::Id(Name::from_unquoted("name"))),
             not: false,
             op: ast::LikeOperator::Like,
             rhs: Box::new(Expr::Literal(Literal::String("%john%".to_string()))),
@@ -5618,14 +5618,14 @@ pub mod tests {
     #[test]
     fn test_expressions_equivalent_like_escaped() {
         let expr1 = Expr::Like {
-            lhs: Box::new(Expr::Id(Name::exact_ref("name"))),
+            lhs: Box::new(Expr::Id(Name::from_unquoted("name"))),
             not: false,
             op: ast::LikeOperator::Like,
             rhs: Box::new(Expr::Literal(Literal::String("%john%".to_string()))),
             escape: Some(Box::new(Expr::Literal(Literal::String("\\".to_string())))),
         };
         let expr2 = Expr::Like {
-            lhs: Box::new(Expr::Id(Name::exact_ref("name"))),
+            lhs: Box::new(Expr::Id(Name::from_unquoted("name"))),
             not: false,
             op: ast::LikeOperator::Like,
             rhs: Box::new(Expr::Literal(Literal::String("%john%".to_string()))),
@@ -5636,13 +5636,13 @@ pub mod tests {
     #[test]
     fn test_expressions_equivalent_between() {
         let expr1 = Expr::Between {
-            lhs: Box::new(Expr::Id(Name::exact_ref("age"))),
+            lhs: Box::new(Expr::Id(Name::from_unquoted("age"))),
             not: false,
             start: Box::new(Expr::Literal(Literal::Numeric("18".to_string()))),
             end: Box::new(Expr::Literal(Literal::Numeric("65".to_string()))),
         };
         let expr2 = Expr::Between {
-            lhs: Box::new(Expr::Id(Name::exact_ref("age"))),
+            lhs: Box::new(Expr::Id(Name::from_unquoted("age"))),
             not: false,
             start: Box::new(Expr::Literal(Literal::Numeric("18".to_string()))),
             end: Box::new(Expr::Literal(Literal::Numeric("65".to_string()))),
@@ -5651,7 +5651,7 @@ pub mod tests {
 
         // differing BETWEEN bounds
         let expr3 = Expr::Between {
-            lhs: Box::new(Expr::Id(Name::exact_ref("age"))),
+            lhs: Box::new(Expr::Id(Name::from_unquoted("age"))),
             not: false,
             start: Box::new(Expr::Literal(Literal::Numeric("20".to_string()))),
             end: Box::new(Expr::Literal(Literal::Numeric("65".to_string()))),
@@ -6607,18 +6607,18 @@ pub mod tests {
     #[test]
     fn test_parse_pragma_bool() {
         assert!(parse_pragma_bool(&Expr::Literal(Literal::Numeric("1".into()))).unwrap(),);
-        assert!(parse_pragma_bool(&Expr::Name(Name::exact("true".into()))).unwrap(),);
-        assert!(parse_pragma_bool(&Expr::Name(Name::exact("on".into()))).unwrap(),);
-        assert!(parse_pragma_bool(&Expr::Name(Name::exact("yes".into()))).unwrap(),);
+        assert!(parse_pragma_bool(&Expr::Name(Name::from_unquoted("true"))).unwrap(),);
+        assert!(parse_pragma_bool(&Expr::Name(Name::from_unquoted("on"))).unwrap(),);
+        assert!(parse_pragma_bool(&Expr::Name(Name::from_unquoted("yes"))).unwrap(),);
 
         assert!(!parse_pragma_bool(&Expr::Literal(Literal::Numeric("0".into()))).unwrap(),);
-        assert!(!parse_pragma_bool(&Expr::Name(Name::exact("false".into()))).unwrap(),);
-        assert!(!parse_pragma_bool(&Expr::Name(Name::exact("off".into()))).unwrap(),);
-        assert!(!parse_pragma_bool(&Expr::Name(Name::exact("no".into()))).unwrap(),);
+        assert!(!parse_pragma_bool(&Expr::Name(Name::from_unquoted("false"))).unwrap(),);
+        assert!(!parse_pragma_bool(&Expr::Name(Name::from_unquoted("off"))).unwrap(),);
+        assert!(!parse_pragma_bool(&Expr::Name(Name::from_unquoted("no"))).unwrap(),);
 
-        assert!(parse_pragma_bool(&Expr::Name(Name::exact("nono".into()))).is_err());
-        assert!(parse_pragma_bool(&Expr::Name(Name::exact("10".into()))).is_err());
-        assert!(parse_pragma_bool(&Expr::Name(Name::exact("-1".into()))).is_err());
+        assert!(parse_pragma_bool(&Expr::Name(Name::from_unquoted("nono"))).is_err());
+        assert!(parse_pragma_bool(&Expr::Name(Name::from_unquoted("10"))).is_err());
+        assert!(parse_pragma_bool(&Expr::Name(Name::from_unquoted("-1"))).is_err());
     }
 
     #[test]

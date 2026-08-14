@@ -775,21 +775,17 @@ impl<'a> Resolver<'a> {
     pub(crate) fn resolve_database_id(&self, qualified_name: &ast::QualifiedName) -> Result<usize> {
         // Check if this is a qualified name (database.table) or unqualified
         let resolved_id = if let Some(db_name) = &qualified_name.db_name {
-            match db_name {
-                name if name == "main" => Ok(crate::MAIN_DB_ID),
-                name if name == "temp" => Ok(crate::TEMP_DB_ID),
-                _ => {
-                    // Look up attached database
-                    if let Some((idx, _attached_db)) = self.get_attached_database(db_name.as_str())
-                    {
-                        Ok(idx)
-                    } else {
-                        Err(LimboError::InvalidArgument(format!(
-                            "no such database: {}",
-                            db_name.as_str()
-                        )))
-                    }
-                }
+            if db_name == "main" {
+                Ok(crate::MAIN_DB_ID)
+            } else if db_name == "temp" {
+                Ok(crate::TEMP_DB_ID)
+            } else if let Some((idx, _attached_db)) = self.get_attached_database(db_name.as_str()) {
+                Ok(idx)
+            } else {
+                Err(LimboError::InvalidArgument(format!(
+                    "no such database: {}",
+                    db_name.as_str()
+                )))
             }
         } else {
             // Unqualified table name — when compiling a trigger subprogram,
@@ -2294,11 +2290,11 @@ pub(crate) fn emit_check_constraints<'a>(
     // We cache both unqualified (Expr::Id) and qualified (Expr::Qualified) forms
     // so that CHECK expressions like `CHECK(rowid > 0)` and `CHECK(t.rowid > 0)` both resolve.
     for rowid_name in ROWID_STRS {
-        let rowid_expr = ast::Expr::Id(ast::Name::exact_ref(rowid_name));
+        let rowid_expr = ast::Expr::Id(ast::Name::from_unquoted(rowid_name));
         resolver.cache_expr_reg(Cow::Owned(rowid_expr), rowid_reg, false, None);
         let qualified_expr = ast::Expr::Qualified(
-            ast::Name::exact_ref(table_name),
-            ast::Name::exact_ref(rowid_name),
+            ast::Name::from_unquoted(table_name),
+            ast::Name::from_unquoted(rowid_name),
         );
         resolver.cache_expr_reg(Cow::Owned(qualified_expr), rowid_reg, false, None);
     }
@@ -2314,11 +2310,11 @@ pub(crate) fn emit_check_constraints<'a>(
                 })
             })
             .map(|col| (col.collation(), false));
-        let column_expr = ast::Expr::Id(ast::Name::exact_ref(col_name));
+        let column_expr = ast::Expr::Id(ast::Name::from_unquoted(col_name));
         resolver.cache_expr_reg(Cow::Owned(column_expr), register, false, collation);
         let qualified_expr = ast::Expr::Qualified(
-            ast::Name::exact_ref(table_name),
-            ast::Name::exact_ref(col_name),
+            ast::Name::from_unquoted(table_name),
+            ast::Name::from_unquoted(col_name),
         );
         resolver.cache_expr_reg(Cow::Owned(qualified_expr), register, false, collation);
     }

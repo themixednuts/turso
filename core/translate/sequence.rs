@@ -1001,7 +1001,7 @@ pub(crate) fn emit_drop_sequence_cleanup(
     // Remove from the in-memory schema (sequences + tables maps)
     program.emit_insn(Insn::DropSequence {
         db: database_id,
-        seq_name: seq_name.to_string(),
+        seq_name: crate::IdentKey::from_unquoted(seq_name),
     });
     Ok(true)
 }

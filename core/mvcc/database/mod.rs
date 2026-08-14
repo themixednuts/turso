@@ -46,7 +46,7 @@ use crate::{io::FileSyncType, io_yield_one, return_if_io};
 use crate::{
     turso_assert, turso_assert_eq, turso_assert_less_than, turso_assert_reachable, Numeric,
 };
-use crate::{Connection, Pager, SyncMode};
+use crate::{Connection, IdentKey, IdentKeyStr, Pager, SyncMode};
 use rustc_hash::FxHashMap as HashMap;
 use rustc_hash::FxHashSet as HashSet;
 use std::collections::{BTreeSet, HashMap as StdHashMap};
@@ -828,7 +828,7 @@ enum SavepointKind {
     Statement,
     /// User-visible named savepoint.
     Named {
-        name: String,
+        name: IdentKey,
         starts_transaction: bool,
     },
 }
@@ -881,7 +881,7 @@ impl<A: RowVersionAllocator> Savepoint<A> {
 
     /// Creates a user-visible named savepoint snapshot.
     fn named(
-        name: String,
+        name: IdentKey,
         starts_transaction: bool,
         deferred_fk_violations: isize,
         header: DatabaseHeader,
@@ -1092,7 +1092,7 @@ impl<A: RowVersionAllocator> Transaction<A> {
     /// for that transaction.
     fn begin_named_savepoint(
         &self,
-        name: String,
+        name: IdentKey,
         starts_transaction: bool,
         deferred_fk_violations: isize,
     ) {
@@ -1144,7 +1144,7 @@ impl<A: RowVersionAllocator> Transaction<A> {
 
     /// Release a named savepoint. If this savepoint starts a transaction, returns
     /// [SavepointResult::Commit] to indicate the transaction should be committed.
-    fn release_named_savepoint(&self, name: &str) -> SavepointResult {
+    fn release_named_savepoint(&self, name: &IdentKeyStr) -> SavepointResult {
         let mut savepoints = self.savepoint_stack.write();
         let Some(target_idx) = savepoints.iter().rposition(|savepoint| {
             matches!(
@@ -1188,7 +1188,10 @@ impl<A: RowVersionAllocator> Transaction<A> {
     /// Find the named savepoint to rollback to and pop all savepoints above it. Returns the rolled
     /// back savepoints and net change in deferred FK violations for undoing changes to transaction
     /// state.
-    fn rollback_to_named_savepoint(&self, name: &str) -> Option<SavepointRollbackResult<A>> {
+    fn rollback_to_named_savepoint(
+        &self,
+        name: &IdentKeyStr,
+    ) -> Option<SavepointRollbackResult<A>> {
         let mut savepoints = self.savepoint_stack.write();
         let target_idx = savepoints.iter().rposition(|savepoint| {
             matches!(
@@ -6632,7 +6635,7 @@ impl<Clock: LogicalClock, A: ConcurrentAllocator> MvStore<Clock, A> {
     pub fn begin_named_savepoint(
         &self,
         tx_id: TxID,
-        name: String,
+        name: IdentKey,
         starts_transaction: bool,
         deferred_fk_violations: isize,
     ) {
@@ -6657,7 +6660,11 @@ impl<Clock: LogicalClock, A: ConcurrentAllocator> MvStore<Clock, A> {
     ///
     /// Returns [SavepointResult::Commit] when releasing the root savepoint should commit the
     /// transaction.
-    pub fn release_named_savepoint(&self, tx_id: TxID, name: &str) -> Result<SavepointResult> {
+    pub fn release_named_savepoint(
+        &self,
+        tx_id: TxID,
+        name: &IdentKeyStr,
+    ) -> Result<SavepointResult> {
         let tx = self
             .txs
             .get(&tx_id)
@@ -6691,7 +6698,11 @@ impl<Clock: LogicalClock, A: ConcurrentAllocator> MvStore<Clock, A> {
     ///
     /// Returns the deferred FK snapshot stored on the named savepoint, or `None` if no matching
     /// savepoint exists.
-    pub fn rollback_to_named_savepoint(&self, tx_id: TxID, name: &str) -> Result<Option<isize>> {
+    pub fn rollback_to_named_savepoint(
+        &self,
+        tx_id: TxID,
+        name: &IdentKeyStr,
+    ) -> Result<Option<isize>> {
         let tx = self.txs.get(&tx_id).unwrap_or_else(|| {
             panic!("Transaction {tx_id} not found while rolling back named savepoint")
         });

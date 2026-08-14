@@ -509,8 +509,6 @@ pub fn translate_drop_trigger(
         bail_parse_error!("no such trigger: {}", normalized_trigger_name);
     }
 
-    let normalized_trigger_name = String::from(normalized_trigger_name);
-
     let opts = ProgramBuilderOpts::new(1, 30, 1);
     program.extend(&opts);
 
@@ -566,7 +564,8 @@ pub fn translate_drop_trigger(
     });
 
     // Check if name matches
-    let trigger_name_str_reg = program.emit_string8_new_reg(normalized_trigger_name.clone());
+    let trigger_name_str_reg =
+        program.emit_string8_new_reg(normalized_trigger_name.as_str().to_owned());
     program.emit_insn(Insn::Ne {
         lhs: name_reg,
         rhs: trigger_name_str_reg,

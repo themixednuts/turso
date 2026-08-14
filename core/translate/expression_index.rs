@@ -34,11 +34,11 @@ pub fn normalize_expr_for_index_matching(
         match e {
             ast::Expr::Column { column, .. } => {
                 if let Some(name) = columns.get(*column).and_then(|c| c.name.as_ref()) {
-                    *e = ast::Expr::Id(ast::Name::exact_ref(name));
+                    *e = ast::Expr::Id(ast::Name::from_unquoted(name));
                 }
             }
             ast::Expr::RowId { .. } => {
-                *e = ast::Expr::Id(ast::Name::exact_ref(ROWID_STRS[0]));
+                *e = ast::Expr::Id(ast::Name::from_unquoted(ROWID_STRS[0]));
             }
             _ => {}
         }

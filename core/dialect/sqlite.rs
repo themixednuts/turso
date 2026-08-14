@@ -194,7 +194,7 @@ fn pragma_vtabs() -> Vec<Arc<VirtualTable>> {
 /// directly, because the translated AST always references the engine
 /// surface regardless of the frontend dialect.
 pub fn resolve_builtin_function(name: &str, arg_count: usize) -> crate::Result<Option<Func>> {
-    let normalized_name: crate::IdentKey = crate::IdentKey::from_unquoted(name);
+    let normalized_name = crate::IdentKey::from_unquoted(name);
     match normalized_name.as_str() {
         "avg" => {
             if arg_count != 1 {

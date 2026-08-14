@@ -20,16 +20,9 @@ use crate::{
 /// For plain table names like "t1", produces `Qualified(t1, col)`.
 fn qualified_column_expr(table_name: &str, column_name: &str) -> Expr {
     if let Some((db, tbl)) = table_name.split_once('.') {
-        Expr::DoublyQualified(
-            Name::from_string(db),
-            Name::from_string(tbl),
-            Name::from_string(column_name),
-        )
+        Expr::DoublyQualified(Name::new(db), Name::new(tbl), Name::new(column_name))
     } else {
-        Expr::Qualified(
-            Name::from_string(table_name),
-            Name::from_string(column_name),
-        )
+        Expr::Qualified(Name::new(table_name), Name::new(column_name))
     }
 }
 

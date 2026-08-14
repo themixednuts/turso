@@ -25,7 +25,7 @@ use crate::types::{IOCompletions, WalState};
 use crate::util::IOExt as _;
 use crate::{
     io::CompletionGroup, return_if_io, types::WalFrameInfo, Completion, Connection, IOResult,
-    LimboError, Result, TransactionState,
+    IdentKey, IdentKeyStr, LimboError, Result, TransactionState,
 };
 use crate::{io_yield_one, Buffer, CompletionError, IOContext, OpenFlags, PageCodec, SyncMode, IO};
 #[allow(unused_imports)]
@@ -1222,7 +1222,7 @@ enum BtreeCreateVacuumFullState {
 enum SavepointKind {
     Statement,
     Named {
-        name: String,
+        name: IdentKey,
         starts_transaction: bool,
     },
 }
@@ -2027,7 +2027,7 @@ impl Pager {
     /// transaction.
     pub fn open_named_savepoint(
         &self,
-        name: String,
+        name: IdentKey,
         db_size: u32,
         starts_transaction: bool,
         deferred_fk_violations: isize,
@@ -2043,7 +2043,7 @@ impl Pager {
     }
 
     /// Releases the newest matching named savepoint and all nested savepoints opened after it.
-    pub fn release_named_savepoint(&self, name: &str) -> Result<SavepointResult> {
+    pub fn release_named_savepoint(&self, name: &IdentKeyStr) -> Result<SavepointResult> {
         let mut savepoints = self.savepoints.write();
         let Some(target_idx) = savepoints.iter().rposition(|savepoint| {
             matches!(
@@ -2132,7 +2132,7 @@ impl Pager {
     /// Rollback to the newest matching named savepoint while keeping the named savepoint active.
     ///
     /// Returns deferred FK counter snapshot for the rolled-back savepoint.
-    pub fn rollback_to_named_savepoint(&self, name: &str) -> Result<Option<isize>> {
+    pub fn rollback_to_named_savepoint(&self, name: &IdentKeyStr) -> Result<Option<isize>> {
         let target = {
             let savepoints = self.savepoints.read();
             let Some(target_idx) = savepoints.iter().rposition(|savepoint| {

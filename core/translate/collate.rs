@@ -49,11 +49,15 @@ static CUSTOM_COLLATION_NAMES: LazyLock<Mutex<CustomCollationNames>> =
 
 impl CollationSeq {
     pub fn new(collation: &str) -> crate::Result<Self> {
-        match crate::IdentKeyStr::new(collation) {
-            name if name == "binary" => return Ok(Self::Binary),
-            name if name == "nocase" => return Ok(Self::NoCase),
-            name if name == "rtrim" => return Ok(Self::Rtrim),
-            _ => {}
+        let name = crate::IdentKeyStr::new(collation);
+        if name == "binary" {
+            return Ok(Self::Binary);
+        }
+        if name == "nocase" {
+            return Ok(Self::NoCase);
+        }
+        if name == "rtrim" {
+            return Ok(Self::Rtrim);
         }
 
         LocaleCollationRegistry::global()
@@ -627,7 +631,7 @@ mod tests {
                     column: 0,
                     is_rowid_alias: false,
                 }),
-                Name::exact_ref(collation),
+                Name::from_unquoted(collation),
             );
             let collseq = get_collseq_from_expr(&expr, &table_references).unwrap();
             assert_eq!(collseq, Some(expected_collation));
@@ -647,11 +651,11 @@ mod tests {
                 column: 0,
                 is_rowid_alias: false,
             }),
-            Name::exact_ref("NOCASE"),
+            Name::from_unquoted("NOCASE"),
         );
         let expr = Expr::Collate(
             Box::new(Expr::Parenthesized(std::vec![Box::new(inner)])),
-            Name::exact_ref("RTRIM"),
+            Name::from_unquoted("RTRIM"),
         );
         let collseq = get_collseq_from_expr(&expr, &table_references).unwrap();
         assert_eq!(collseq, Some(CollationSeq::Rtrim));
@@ -709,7 +713,7 @@ mod tests {
         };
         let rhs = Expr::Parenthesized(std::vec![Box::new(Expr::Collate(
             Box::new(Expr::Literal(Literal::String("x".to_string()))),
-            Name::exact_ref("RTRIM"),
+            Name::from_unquoted("RTRIM"),
         ))]);
         let expr = Expr::binary(lhs, Operator::Add, rhs);
         let collseq = get_collseq_from_expr(&expr, &table_references).unwrap();
@@ -746,11 +750,11 @@ mod tests {
         // (x COLLATE NOCASE) + (y COLLATE RTRIM) -- NOCASE wins since it's on the left side
         let lhs = Expr::Collate(
             Box::new(Expr::Literal(Literal::String("x".to_string()))),
-            Name::exact_ref("NOCASE"),
+            Name::from_unquoted("NOCASE"),
         );
         let rhs = Expr::Collate(
             Box::new(Expr::Literal(Literal::String("y".to_string()))),
-            Name::exact_ref("RTRIM"),
+            Name::from_unquoted("RTRIM"),
         );
         let expr = Expr::binary(lhs, Operator::Add, rhs);
         let collseq = get_collseq_from_expr(&expr, &table_references).unwrap();
@@ -828,7 +832,7 @@ mod tests {
                 column: 0,
                 is_rowid_alias: false,
             }),
-            Name::exact_ref("RTRIM"),
+            Name::from_unquoted("RTRIM"),
         );
         assert_eq!(
             resolve_comparison_collseq(&lhs, &rhs, &table_refs).unwrap(),

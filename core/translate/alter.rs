@@ -799,13 +799,11 @@ fn emit_add_column_check_validation(
             &mut substituted,
             &mut |e: &mut ast::Expr| -> Result<WalkControl> {
                 match e {
-                    ast::Expr::Id(name) if name.as_key_str() == column_key => {
+                    ast::Expr::Id(name) if name == column_key => {
                         *e = default_expr.clone();
                         Ok(WalkControl::SkipChildren)
                     }
-                    ast::Expr::Qualified(tbl, col)
-                        if tbl == table_name && col.as_key_str() == column_key =>
-                    {
+                    ast::Expr::Qualified(tbl, col) if tbl == table_name && col == column_key => {
                         *e = default_expr.clone();
                         Ok(WalkControl::SkipChildren)
                     }
@@ -889,8 +887,8 @@ pub fn translate_alter_table(
             return translate_rename_virtual_table(
                 program,
                 tbl,
-                table_name,
-                String::from(new_name.to_key()),
+                &qualified_name.name,
+                new_name,
                 resolver,
                 connection,
                 database_id,
@@ -1225,7 +1223,7 @@ pub fn translate_alter_table(
 
                     program.emit_insn(Insn::DropColumn {
                         db: database_id,
-                        table: btree.name.clone(),
+                        table: IdentKey::from_unquoted(&btree.name),
                         column_index: dropped_index,
                     })
                 },
@@ -1543,7 +1541,7 @@ pub fn translate_alter_table(
                     program.emit_insn(Insn::AddColumn {
                         data: Box::new(AddColumnData {
                             db: database_id,
-                            table: table_name.to_owned(),
+                            table: IdentKey::from_unquoted(table_name),
                             column,
                             check_constraints: btree.check_constraints.to_vec(),
                             foreign_keys: btree.foreign_keys.to_vec(),
@@ -1553,20 +1551,21 @@ pub fn translate_alter_table(
             )?
         }
         ast::AlterTableBody::RenameTo(new_name) => {
-            let new_name = new_name.as_str();
-            let old_name_key: IdentKey = IdentKey::from_unquoted(table_name);
-            let new_name_key: IdentKey = IdentKey::from_unquoted(new_name);
+            let new_name = ast::Name::from_unquoted(new_name.as_str());
+            let new_name_text = new_name.as_str();
+            let old_name_key = IdentKey::from_unquoted(table_name);
+            let new_name_key = new_name.to_key();
             let mut temp_triggers_to_rewrite: Vec<(String, String, bool)> = Vec::new();
 
             if resolver.with_schema(database_id, |s| {
-                s.get_table(new_name).is_some()
+                s.get_table(new_name_text).is_some()
                     || s.indexes
                         .values()
                         .flatten()
-                        .any(|index| index.name.eq_ignore_ascii_case(new_name))
+                        .any(|index| index.name.eq_ignore_ascii_case(new_name_text))
             }) {
                 return Err(LimboError::ParseError(format!(
-                    "there is already another table or index with this name: {new_name}"
+                    "there is already another table or index with this name: {new_name_text}"
                 )));
             };
 
@@ -1604,7 +1603,7 @@ pub fn translate_alter_table(
                     let new_sql = rewrite_trigger_sql_for_table_rename(
                         &trigger_entry.trigger.sql,
                         table_name,
-                        new_name,
+                        new_name_text,
                         &renamed_db_name,
                     )?;
                     if new_sql != trigger_entry.trigger.sql {
@@ -1649,12 +1648,6 @@ pub fn translate_alter_table(
                     program.emit_column_or_rowid(cursor_id, i, first_column + i);
                 }
 
-                program.emit_string8_new_reg(table_name.to_string());
-                program.mark_last_insn_constant();
-
-                program.emit_string8_new_reg(new_name.to_string());
-                program.mark_last_insn_constant();
-
                 let out = program.alloc_registers(5);
 
                 program.emit_insn(Insn::Function {
@@ -1662,8 +1655,11 @@ pub fn translate_alter_table(
                     start_reg: first_column,
                     dest: out,
                     func: crate::function::FuncCtx {
-                        func: Func::AlterTable(AlterTableFunc::RenameTable),
-                        arg_count: 7,
+                        func: Func::AlterTable(AlterTableFunc::RenameTable {
+                            from: old_name_key.clone(),
+                            to: new_name.clone(),
+                        }),
+                        arg_count: 5,
                     },
                 });
 
@@ -1734,7 +1730,7 @@ pub fn translate_alter_table(
                 let escaped_trigger_name = escape_sql_string_literal(&trigger_name);
                 let qualified_schema_table = schema_table_name_for_db(resolver, crate::TEMP_DB_ID);
                 let tbl_name_update = if renames_target {
-                    let escaped_new_name = escape_sql_string_literal(new_name);
+                    let escaped_new_name = escape_sql_string_literal(new_name_text);
                     format!(", tbl_name = '{escaped_new_name}'")
                 } else {
                     String::new()
@@ -1787,8 +1783,8 @@ pub fn translate_alter_table(
 
             program.emit_insn(Insn::RenameTable {
                 db: database_id,
-                from: table_name.to_owned(),
-                to: new_name.to_owned(),
+                from: old_name_key,
+                to: new_name,
             });
         }
         body @ (ast::AlterTableBody::AlterColumn { .. }
@@ -1820,6 +1816,8 @@ pub fn translate_alter_table(
 
             let from = from.as_str();
             let col_name = col_name.as_str();
+            let table_key = IdentKey::from_unquoted(table_name);
+            let column_key = IdentKey::from_unquoted(from);
 
             let Some((column_index, _)) = btree.get_column(from) else {
                 return Err(LimboError::ParseError(format!(
@@ -2083,6 +2081,7 @@ pub fn translate_alter_table(
                 db: database_id,
             });
 
+            let definition = Arc::new(definition);
             program.cursor_loop(cursor_id, |program, rowid| {
                 let sqlite_schema_column_len = sqlite_schema.columns().len();
                 turso_assert_eq!(sqlite_schema_column_len, 5);
@@ -2093,28 +2092,29 @@ pub fn translate_alter_table(
                     program.emit_column_or_rowid(cursor_id, i, first_column + i);
                 }
 
-                program.emit_string8_new_reg(table_name.to_string());
-                program.mark_last_insn_constant();
-
-                program.emit_string8_new_reg(from.to_string());
-                program.mark_last_insn_constant();
-
-                program.emit_string8_new_reg(definition.to_string());
-                program.mark_last_insn_constant();
-
                 let out = program.alloc_registers(sqlite_schema_column_len);
+
+                let alter_func = if rename {
+                    AlterTableFunc::RenameColumn {
+                        table: table_key.clone(),
+                        from: column_key.clone(),
+                        to: definition.col_name.clone(),
+                    }
+                } else {
+                    AlterTableFunc::AlterColumn {
+                        table: table_key.clone(),
+                        column: column_key.clone(),
+                        definition: definition.clone(),
+                    }
+                };
 
                 program.emit_insn(Insn::Function {
                     constant_mask: 0,
                     start_reg: first_column,
                     dest: out,
                     func: crate::function::FuncCtx {
-                        func: Func::AlterTable(if rename {
-                            AlterTableFunc::RenameColumn
-                        } else {
-                            AlterTableFunc::AlterColumn
-                        }),
-                        arg_count: 8,
+                        func: Func::AlterTable(alter_func),
+                        arg_count: 5,
                     },
                 });
 
@@ -2277,7 +2277,6 @@ pub fn translate_alter_table(
             }
 
             if clears_autoincrement_sequence {
-                let table_key: IdentKey = IdentKey::from_unquoted(table_name);
                 emit_delete_sqlite_sequence_entry(
                     program,
                     resolver,
@@ -2294,9 +2293,9 @@ pub fn translate_alter_table(
             });
             program.emit_insn(Insn::AlterColumn {
                 db: database_id,
-                table: table_name.to_owned(),
+                table: table_key,
                 column_index,
-                definition: Box::new(definition),
+                definition,
                 rename,
             });
         }
@@ -2392,8 +2391,8 @@ fn non_virtual_affinity_str(table: &BTreeTable) -> String {
 fn translate_rename_virtual_table(
     program: &mut ProgramBuilder,
     vtab: Arc<VirtualTable>,
-    old_name: &str,
-    new_name_norm: String,
+    old_name: &ast::Name,
+    new_name: &ast::Name,
     resolver: &Resolver,
     connection: &Arc<crate::Connection>,
     database_id: usize,
@@ -2401,11 +2400,13 @@ fn translate_rename_virtual_table(
     let schema_version = resolver.with_schema(database_id, |s| s.schema_version);
     program.begin_write_operation()?;
     let vtab_cur = program.alloc_cursor_id(CursorType::VirtualTable(vtab));
+    let new_name = ast::Name::from_unquoted(new_name.as_str());
     program.emit_insn(Insn::VOpen {
         cursor_id: vtab_cur,
     });
 
-    let new_name_reg = program.emit_string8_new_reg(new_name_norm.clone());
+    let old_name_key = old_name.to_key();
+    let new_name_reg = program.emit_string8_new_reg(new_name.as_str().to_owned());
     program.emit_insn(Insn::VRename {
         cursor_id: vtab_cur,
         new_name_reg,
@@ -2434,12 +2435,6 @@ fn translate_rename_virtual_table(
             program.emit_column_or_rowid(schema_cur, i, first_col + i);
         }
 
-        program.emit_string8_new_reg(old_name.to_string());
-        program.mark_last_insn_constant();
-
-        program.emit_string8_new_reg(new_name_norm.clone());
-        program.mark_last_insn_constant();
-
         let out = program.alloc_registers(ncols);
 
         program.emit_insn(Insn::Function {
@@ -2447,8 +2442,11 @@ fn translate_rename_virtual_table(
             start_reg: first_col,
             dest: out,
             func: crate::function::FuncCtx {
-                func: Func::AlterTable(AlterTableFunc::RenameTable),
-                arg_count: 7,
+                func: Func::AlterTable(AlterTableFunc::RenameTable {
+                    from: old_name_key.clone(),
+                    to: new_name.clone(),
+                }),
+                arg_count: 5,
             },
         });
 
@@ -2476,7 +2474,7 @@ fn translate_rename_virtual_table(
             key_reg: rowid,
             record_reg: rec,
             flag: crate::vdbe::insn::InsertFlags(0),
-            table_name: old_name.to_string(),
+            table_name: old_name.as_str().to_owned(),
         });
     });
 
@@ -2490,8 +2488,8 @@ fn translate_rename_virtual_table(
 
     program.emit_insn(Insn::RenameTable {
         db: database_id,
-        from: old_name.to_owned(),
-        to: new_name_norm,
+        from: old_name_key,
+        to: new_name,
     });
 
     program.emit_insn(Insn::Close {
@@ -2561,7 +2559,7 @@ fn rewrite_trigger_sql_for_table_rename(
         if qualifier_matches && tbl_name.name.as_str().eq_ignore_ascii_case(old_table_name) {
             ast::QualifiedName {
                 db_name: tbl_name.db_name,
-                name: ast::Name::exact_ref(new_table_name),
+                name: ast::Name::from_unquoted(new_table_name),
                 alias: None,
             }
         } else {
@@ -2624,8 +2622,8 @@ fn rewrite_trigger_sql_for_column_rename(
         )));
     };
 
-    let old_column_key: IdentKey = IdentKey::from_unquoted(old_column_name);
-    let new_column_key: IdentKey = IdentKey::from_unquoted(new_column_name);
+    let old_column_key = IdentKey::from_unquoted(old_column_name);
+    let new_column_name = ast::Name::from_unquoted(new_column_name);
 
     // Get the trigger's owning table to check unqualified column references
     let trigger_table_name_raw = tbl_name.name.as_str();
@@ -2659,8 +2657,8 @@ fn rewrite_trigger_sql_for_column_rename(
             ast::TriggerEvent::UpdateOf(mut cols) => {
                 // Rewrite column names in UPDATE OF list
                 for col in &mut cols {
-                    if *col.as_key_str() == old_column_key {
-                        *col = ast::Name::from_string(new_column_key.as_str());
+                    if col == &old_column_key {
+                        *col = new_column_name.clone();
                     }
                 }
                 ast::TriggerEvent::UpdateOf(cols)
@@ -2685,11 +2683,11 @@ fn rewrite_trigger_sql_for_column_rename(
                         ex
                     {
                         if (ns == "new" || ns == "old")
-                            && *col.as_key_str() == old_column_key
+                            && col == &old_column_key
                             && is_renaming_trigger_table
                             && trigger_table.get_column(col.as_str()).is_some()
                         {
-                            *col = ast::Name::from_string(new_column_key.as_str());
+                            *col = new_column_name.clone();
                         }
                     }
                     Ok(WalkControl::Continue)
@@ -2707,7 +2705,7 @@ fn rewrite_trigger_sql_for_column_rename(
             &mut when_expr.clone(),
             &mut |ex: &mut ast::Expr| -> Result<WalkControl> {
                 if let ast::Expr::Id(ref name) | ast::Expr::Name(ref name) = ex {
-                    if *name.as_key_str() == old_column_key {
+                    if name == &old_column_key {
                         has_bare_old_col = true;
                     }
                 }
@@ -2731,7 +2729,7 @@ fn rewrite_trigger_sql_for_column_rename(
             trigger_table_name_raw,
             target_table_key.as_str(),
             old_column_key.as_str(),
-            new_column_key.as_str(),
+            new_column_name.as_str(),
             trigger_database_id,
             resolver,
         )?;
@@ -2817,14 +2815,14 @@ fn rewrite_trigger_sql_for_column_rename(
 #[derive(Clone, Copy)]
 enum ColumnRenameMode<'a> {
     Validate,
-    Rewrite { new_col_norm: &'a str },
+    Rewrite { new_col_name: &'a str },
 }
 
 impl<'a> ColumnRenameMode<'a> {
     fn rewritten_name(self) -> Option<&'a str> {
         match self {
             Self::Validate => None,
-            Self::Rewrite { new_col_norm } => Some(new_col_norm),
+            Self::Rewrite { new_col_name } => Some(new_col_name),
         }
     }
 }
@@ -2881,8 +2879,8 @@ fn apply_expr_column_ref_with_context(
             // a rewrite on the same `col` node.
             if namespace == "new" || namespace == "old" {
                 if is_renaming_trigger_table && trigger_table.get_column(col.as_str()).is_some() {
-                    if let Some(new_col_norm) = mode.rewritten_name() {
-                        *col = ast::Name::from_string(new_col_norm);
+                    if let Some(new_col_name) = mode.rewritten_name() {
+                        *col = ast::Name::from_unquoted(new_col_name);
                     } else {
                         return Err(no_such_column_error(&error_column_ref));
                     }
@@ -2896,8 +2894,8 @@ fn apply_expr_column_ref_with_context(
                     })
             {
                 let _ = (ctx_name_norm, is_renaming_ctx);
-                if let Some(new_col_norm) = mode.rewritten_name() {
-                    *col = ast::Name::from_string(new_col_norm);
+                if let Some(new_col_name) = mode.rewritten_name() {
+                    *col = ast::Name::from_unquoted(new_col_name);
                 } else {
                     return Err(no_such_column_error(&error_column_ref));
                 }
@@ -2905,7 +2903,7 @@ fn apply_expr_column_ref_with_context(
                 && namespace == trigger_table_name
                 && trigger_table.get_column(col.as_str()).is_some()
             {
-                if let Some(new_col_norm) = mode.rewritten_name() {
+                if let Some(new_col_name) = mode.rewritten_name() {
                     let ctx_is_different_table =
                         context_table.as_ref().is_some_and(|(_, ctx_name, _)| {
                             IdentKeyStr::new(ctx_name) != trigger_table_name
@@ -2913,7 +2911,7 @@ fn apply_expr_column_ref_with_context(
                     if ctx_is_different_table {
                         return Err(no_such_column_error(&error_column_ref));
                     }
-                    *col = ast::Name::from_string(new_col_norm);
+                    *col = ast::Name::from_unquoted(new_col_name);
                 } else {
                     return Err(no_such_column_error(&error_column_ref));
                 }
@@ -2921,8 +2919,8 @@ fn apply_expr_column_ref_with_context(
                 .iter()
                 .any(|qualifier| qualifier == namespace)
             {
-                if let Some(new_col_norm) = mode.rewritten_name() {
-                    *col = ast::Name::from_string(new_col_norm);
+                if let Some(new_col_name) = mode.rewritten_name() {
+                    *col = ast::Name::from_unquoted(new_col_name);
                 } else {
                     return Err(no_such_column_error(&error_column_ref));
                 }
@@ -2936,8 +2934,8 @@ fn apply_expr_column_ref_with_context(
             if let Some((ctx_table, _, is_renaming_ctx)) = context_table {
                 if ctx_table.get_column(col.as_str()).is_some() {
                     if is_renaming_ctx {
-                        if let Some(new_col_norm) = mode.rewritten_name() {
-                            *e = ast::Expr::Id(ast::Name::from_string(new_col_norm));
+                        if let Some(new_col_name) = mode.rewritten_name() {
+                            *e = ast::Expr::Id(ast::Name::from_unquoted(new_col_name));
                         } else {
                             return Err(no_such_column_error(old_col_norm));
                         }
@@ -2959,8 +2957,8 @@ fn apply_expr_column_ref_with_context(
             if (is_renaming_trigger_table && trigger_table.get_column(col.as_str()).is_some())
                 || !from_target_qualifiers.is_empty()
             {
-                if let Some(new_col_norm) = mode.rewritten_name() {
-                    *e = ast::Expr::Id(ast::Name::from_string(new_col_norm));
+                if let Some(new_col_name) = mode.rewritten_name() {
+                    *e = ast::Expr::Id(ast::Name::from_unquoted(new_col_name));
                 } else {
                     return Err(no_such_column_error(old_col_norm));
                 }
@@ -2990,7 +2988,7 @@ fn apply_expr_for_column_rename(
 
     let context_table_info: Option<(Arc<BTreeTable>, IdentKey, bool)> =
         if let Some(ctx_name) = context_table_name {
-            let context_table_key: IdentKey = IdentKey::from_unquoted(ctx_name);
+            let context_table_key = IdentKey::from_unquoted(ctx_name);
             let is_renaming = context_table_key == target_table_name;
             let table = resolve_trigger_command_table_for_alter(
                 resolver,
@@ -3115,8 +3113,7 @@ fn apply_upsert_for_column_rename(
     database_id: usize,
     resolver: &Resolver,
 ) -> Result<()> {
-    let insert_table_key: &IdentKeyStr = IdentKeyStr::new(insert_table_name);
-    let insert_targets_renamed_table = insert_table_key == target_table_name;
+    let insert_targets_renamed_table = IdentKeyStr::new(insert_table_name) == target_table_name;
 
     if let Some(index) = &mut upsert.index {
         for target in &mut index.targets {
@@ -3128,14 +3125,14 @@ fn apply_upsert_for_column_rename(
                 trigger_table_name,
                 target_table_name,
                 old_col_norm,
-                Some(insert_table_key.as_str()),
+                Some(insert_table_name),
                 &[],
                 database_id,
                 resolver,
             )?;
             if insert_targets_renamed_table {
-                if let Some(new_col_norm) = mode.rewritten_name() {
-                    rename_excluded_column_refs(&mut target.expr, old_col_norm, new_col_norm)?;
+                if let Some(new_col_name) = mode.rewritten_name() {
+                    rename_excluded_column_refs(&mut target.expr, old_col_norm, new_col_name)?;
                 }
             }
         }
@@ -3148,14 +3145,14 @@ fn apply_upsert_for_column_rename(
                 trigger_table_name,
                 target_table_name,
                 old_col_norm,
-                Some(insert_table_key.as_str()),
+                Some(insert_table_name),
                 &[],
                 database_id,
                 resolver,
             )?;
             if insert_targets_renamed_table {
-                if let Some(new_col_norm) = mode.rewritten_name() {
-                    rename_excluded_column_refs(where_clause, old_col_norm, new_col_norm)?;
+                if let Some(new_col_name) = mode.rewritten_name() {
+                    rename_excluded_column_refs(where_clause, old_col_norm, new_col_name)?;
                 }
             }
         }
@@ -3166,8 +3163,8 @@ fn apply_upsert_for_column_rename(
             if insert_targets_renamed_table {
                 for col_name in &mut set.col_names {
                     if col_name.as_str().eq_ignore_ascii_case(old_col_norm) {
-                        if let Some(new_col_norm) = mode.rewritten_name() {
-                            *col_name = ast::Name::from_string(new_col_norm);
+                        if let Some(new_col_name) = mode.rewritten_name() {
+                            *col_name = ast::Name::from_unquoted(new_col_name);
                         } else {
                             return Err(no_such_column_error(old_col_norm));
                         }
@@ -3182,14 +3179,14 @@ fn apply_upsert_for_column_rename(
                 trigger_table_name,
                 target_table_name,
                 old_col_norm,
-                Some(insert_table_key.as_str()),
+                Some(insert_table_name),
                 &[],
                 database_id,
                 resolver,
             )?;
             if insert_targets_renamed_table {
-                if let Some(new_col_norm) = mode.rewritten_name() {
-                    rename_excluded_column_refs(&mut set.expr, old_col_norm, new_col_norm)?;
+                if let Some(new_col_name) = mode.rewritten_name() {
+                    rename_excluded_column_refs(&mut set.expr, old_col_norm, new_col_name)?;
                 }
             }
         }
@@ -3202,14 +3199,14 @@ fn apply_upsert_for_column_rename(
                 trigger_table_name,
                 target_table_name,
                 old_col_norm,
-                Some(insert_table_key.as_str()),
+                Some(insert_table_name),
                 &[],
                 database_id,
                 resolver,
             )?;
             if insert_targets_renamed_table {
-                if let Some(new_col_norm) = mode.rewritten_name() {
-                    rename_excluded_column_refs(expr, old_col_norm, new_col_norm)?;
+                if let Some(new_col_name) = mode.rewritten_name() {
+                    rename_excluded_column_refs(expr, old_col_norm, new_col_name)?;
                 }
             }
         }
@@ -3684,8 +3681,8 @@ fn apply_trigger_cmd_for_column_rename(
                 for set in sets.iter_mut() {
                     for col_name in &mut set.col_names {
                         if col_name.as_str().eq_ignore_ascii_case(old_col_norm) {
-                            if let Some(new_col_norm) = mode.rewritten_name() {
-                                *col_name = ast::Name::from_string(new_col_norm);
+                            if let Some(new_col_name) = mode.rewritten_name() {
+                                *col_name = ast::Name::from_unquoted(new_col_name);
                             } else {
                                 return Err(no_such_column_error(old_col_norm));
                             }
@@ -3750,8 +3747,8 @@ fn apply_trigger_cmd_for_column_rename(
             if tbl_name.as_str().eq_ignore_ascii_case(target_table_name) {
                 for col_name in col_names.iter_mut() {
                     if col_name.as_str().eq_ignore_ascii_case(old_col_norm) {
-                        if let Some(new_col_norm) = mode.rewritten_name() {
-                            *col_name = ast::Name::from_string(new_col_norm);
+                        if let Some(new_col_name) = mode.rewritten_name() {
+                            *col_name = ast::Name::from_unquoted(new_col_name);
                         } else {
                             return Err(no_such_column_error(old_col_norm));
                         }
@@ -3882,14 +3879,14 @@ fn validate_trigger_after_column_rename(
 fn rename_excluded_column_refs(
     expr: &mut ast::Expr,
     old_col_norm: &str,
-    new_col_norm: &str,
+    new_col_name: &str,
 ) -> Result<()> {
     walk_expr_mut(expr, &mut |e: &mut ast::Expr| -> Result<WalkControl> {
         if let ast::Expr::Qualified(ns, col) | ast::Expr::DoublyQualified(_, ns, col) = e {
             if ns.as_str().eq_ignore_ascii_case("excluded")
                 && col.as_str().eq_ignore_ascii_case(old_col_norm)
             {
-                *col = ast::Name::from_string(new_col_norm);
+                *col = ast::Name::from_unquoted(new_col_name);
             }
         }
         Ok(WalkControl::Continue)
@@ -3973,13 +3970,13 @@ fn rewrite_trigger_cmd_for_column_rename(
     trigger_table_name: &str,
     target_table_name: &str,
     old_col_norm: &str,
-    new_col_norm: &str,
+    new_col_name: &str,
     database_id: usize,
     resolver: &Resolver,
 ) -> Result<ast::TriggerCmd> {
     let mut cmd = cmd;
     apply_trigger_cmd_for_column_rename(
-        ColumnRenameMode::Rewrite { new_col_norm },
+        ColumnRenameMode::Rewrite { new_col_name },
         &mut cmd,
         trigger_table,
         trigger_table_name,
@@ -4856,12 +4853,12 @@ fn table_reference_exists_after_rename(
     trigger_database_id: usize,
     altered_database_id: usize,
 ) -> bool {
-    let table_key: &IdentKeyStr = IdentKeyStr::new(table_name);
+    let table_key = IdentKeyStr::new(table_name);
     let lookup_database_id = if let Some(db_name) = explicit_db_name {
         resolver
             .resolve_database_id(&ast::QualifiedName::fullname(
-                ast::Name::exact_ref(db_name),
-                ast::Name::exact_ref(table_name),
+                ast::Name::from_unquoted(db_name),
+                ast::Name::from_unquoted(table_name),
             ))
             .ok()
     } else if trigger_database_id == crate::TEMP_DB_ID {
@@ -5765,8 +5762,8 @@ fn get_table_columns(
     let lookup_database_id = if let Some(db_name) = explicit_db_name {
         resolver
             .resolve_database_id(&ast::QualifiedName::fullname(
-                ast::Name::exact_ref(db_name),
-                ast::Name::exact_ref(table_name_norm),
+                ast::Name::from_unquoted(db_name),
+                ast::Name::from_unquoted(table_name_norm),
             ))
             .ok()?
     } else if trigger_database_id == crate::TEMP_DB_ID {

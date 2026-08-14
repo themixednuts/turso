@@ -18,12 +18,12 @@ use crate::{
     translate::{collate::CollationSeq, emitter::TransactionMode, plan::BitSet},
     types::KeyInfo,
     vdbe::affinity::Affinity,
-    PreparedProgram, Value,
+    IdentKey, PreparedProgram, Value,
 };
 use strum::EnumCount;
 use strum_macros::{EnumDiscriminants, FromRepr, VariantArray};
 use turso_macros::Description;
-use turso_parser::ast::{ResolveType, SortOrder};
+use turso_parser::ast::{Name, ResolveType, SortOrder};
 
 /// The program run by an `Insn::Program` instruction.
 ///
@@ -301,7 +301,7 @@ impl From<BitSet> for NullMatchingMask {
 #[derive(Debug, Clone)]
 pub struct AddColumnData {
     pub db: usize,
-    pub table: String,
+    pub table: IdentKey,
     pub column: Column,
     pub check_constraints: Vec<CheckConstraint>,
     pub foreign_keys: Vec<Arc<ForeignKey>>,
@@ -968,7 +968,7 @@ pub enum Insn {
     /// Execute a named savepoint operation.
     Savepoint {
         op: SavepointOp,
-        name: String,
+        name: IdentKey,
     },
 
     /// Branch to the given PC.
@@ -1489,13 +1489,13 @@ pub enum Insn {
         ///  unused register p3
         _p3: usize,
         //  The name of the table being dropped
-        table_name: String,
+        table_name: IdentKey,
     },
     DropView {
         /// The database within which this view needs to be dropped
         db: usize,
         /// The name of the view being dropped
-        view_name: String,
+        view_name: IdentKey,
     },
     DropIndex {
         ///  The database within which this index needs to be dropped (P1).
@@ -1508,14 +1508,14 @@ pub enum Insn {
         /// The database within which this trigger needs to be dropped (P1).
         db: usize,
         /// The name of the trigger being dropped
-        trigger_name: String,
+        trigger_name: IdentKey,
     },
     /// Drop a custom type from the in-memory schema
     DropType {
         /// The database within which this type needs to be dropped
         db: usize,
         /// The name of the type being dropped
-        type_name: String,
+        type_name: IdentKey,
     },
     /// Add a fully-configured sequence to the in-memory schema.
     /// Emitted by CREATE SEQUENCE after ParseSchema has added the backing table.
@@ -1527,7 +1527,7 @@ pub enum Insn {
         /// The database within which this sequence needs to be dropped
         db: usize,
         /// The name of the sequence being dropped
-        seq_name: String,
+        seq_name: IdentKey,
     },
     /// Begin the autonomous inner transaction that wraps a sequence
     /// read-modify-write. The translator emits this immediately before
@@ -1855,12 +1855,12 @@ pub enum Insn {
     },
     RenameTable {
         db: usize,
-        from: String,
-        to: String,
+        from: IdentKey,
+        to: Name,
     },
     DropColumn {
         db: usize,
-        table: String,
+        table: IdentKey,
         column_index: usize,
     },
     AddColumn {
@@ -1868,9 +1868,9 @@ pub enum Insn {
     },
     AlterColumn {
         db: usize,
-        table: String,
+        table: IdentKey,
         column_index: usize,
-        definition: Box<turso_parser::ast::ColumnDefinition>,
+        definition: Arc<turso_parser::ast::ColumnDefinition>,
         rename: bool,
     },
     /// Try to set the maximum page count for database P1 to the value in P3.

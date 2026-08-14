@@ -1736,7 +1736,7 @@ impl DbspCompiler {
                     .collect();
                 let ast_args: Vec<Box<ast::Expr>> = ast_args?.into_iter().map(Box::new).collect();
                 Ok(ast::Expr::FunctionCall {
-                    name: ast::Name::exact_ref(fun),
+                    name: ast::Name::from_unquoted(fun),
                     distinctness: None,
                     args: ast_args,
                     order_by: Vec::new(),
@@ -1778,7 +1778,7 @@ impl DbspCompiler {
                 };
 
                 Ok(ast::Expr::FunctionCall {
-                    name: ast::Name::exact_ref(func_name),
+                    name: ast::Name::from_unquoted(func_name),
                     distinctness: if *distinct {
                         Some(ast::Distinctness::Distinct)
                     } else {

@@ -1004,7 +1004,7 @@ fn resolve_index_column<'a>(
         // SQLite interprets single-quoted strings as column names in index expressions
         // (backwards compatibility quirk). We do the same. The string includes quotes.
         Expr::Literal(ast::Literal::String(col_name)) => {
-            let key: crate::IdentKey = crate::IdentKey::new(col_name);
+            let key = ast::Name::new(col_name).into_key();
             table.get_column(key.as_str())?
         }
         Expr::Qualified(_, col) | Expr::DoublyQualified(_, _, col) => {
@@ -1041,15 +1041,15 @@ fn validate_index_expression(expr: &Expr, table: &BTreeTable) -> bool {
         return false;
     }
 
-    let tbl_norm: &crate::IdentKeyStr = crate::IdentKeyStr::new(table.name.as_str());
+    let table_name = crate::IdentKeyStr::new(table.name.as_str());
     let has_col = |name: &str| {
-        let name: &crate::IdentKeyStr = crate::IdentKeyStr::new(name);
+        let name = crate::IdentKeyStr::new(name);
         table
             .columns()
             .iter()
             .any(|c| c.name.as_ref().is_some_and(|cn| name == cn))
     };
-    let is_tbl = |ns: &str| tbl_norm == ns;
+    let is_tbl = |namespace: &str| table_name == namespace;
     let is_deterministic_fn = |name: &str, args: &[Box<Expr>]| {
         Func::resolve_function(name, args.len())
             .is_ok_and(|f| f.is_some_and(|f| is_deterministic_schema_function_call(&f, args)))
@@ -1503,11 +1503,11 @@ mod tests {
     fn index_method_parameters_reject_duplicate_identifier_keys() {
         let parameters = vec![
             (
-                ast::Name::exact_ref("Tokenizer"),
+                ast::Name::from_unquoted("Tokenizer"),
                 Box::new(ast::Expr::Literal(ast::Literal::Null)),
             ),
             (
-                ast::Name::from_string("\"TOKENIZER\""),
+                ast::Name::new("\"TOKENIZER\""),
                 Box::new(ast::Expr::Literal(ast::Literal::Null)),
             ),
         ];

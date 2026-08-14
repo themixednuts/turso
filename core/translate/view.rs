@@ -190,7 +190,7 @@ pub fn translate_create_materialized_view(
 
     // Add the DBSP state table to sqlite_master (required for materialized views)
     // Include the version number in the table name
-    let dbsp_table_name = ast::Name::exact(format!(
+    let dbsp_table_name = ast::Name::from_unquoted(format!(
         "{DBSP_TABLE_PREFIX}{DBSP_CIRCUIT_VERSION}_{normalized_view_name}"
     ));
     let dbsp_table_ident = dbsp_table_name.as_ident();
@@ -476,13 +476,13 @@ pub fn translate_drop_view(
         return Ok(());
     }
 
-    let normalized_view_name = String::from(view_name.name.to_key());
+    let normalized_view_name = view_name.name.to_key();
 
     // If this is a materialized view, we need to destroy its btree as well
     // and also clean up the associated DBSP state table and index
     let dbsp_table_name = if is_materialized_view {
         if let Some(table) =
-            resolver.with_schema(database_id, |s| s.get_table(&normalized_view_name))
+            resolver.with_schema(database_id, |s| s.get_table(normalized_view_name.as_str()))
         {
             if let Some(btree_table) = table.btree() {
                 // Destroy the btree for the materialized view
@@ -552,7 +552,7 @@ pub fn translate_drop_view(
     // Set the view name and type we're looking for
     program.emit_insn(Insn::String8 {
         dest: view_name_reg,
-        value: normalized_view_name.clone(),
+        value: normalized_view_name.as_str().to_owned(),
     });
     program.emit_insn(Insn::String8 {
         dest: type_reg,

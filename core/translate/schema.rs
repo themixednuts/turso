@@ -970,7 +970,7 @@ fn derive_ctas_schema(
             })
         };
         col_defs.push(ColumnDefinition {
-            col_name: ast::Name::exact(name),
+            col_name: ast::Name::from_unquoted(name),
             col_type,
             constraints: vec![],
         });
@@ -2453,7 +2453,7 @@ pub fn translate_drop_table(
         db: database_id,
         _p2: 0,
         _p3: 0,
-        table_name: tbl_name.name.as_str().to_string(),
+        table_name: tbl_name.name.to_key(),
     });
 
     // If the dropped table owned an implicit AUTOINCREMENT sequence, tear
@@ -2652,7 +2652,7 @@ pub fn translate_create_type(
     resolver: &Resolver,
     program: &mut ProgramBuilder,
 ) -> Result<()> {
-    let normalized_name: crate::IdentKey = crate::IdentKey::from_unquoted(type_name);
+    let normalized_name = crate::IdentKey::from_unquoted(type_name);
 
     // Reject names that shadow SQLite base types
     let is_base_type = turso_macros::match_ignore_ascii_case!(match normalized_name.as_bytes() {
@@ -2802,7 +2802,7 @@ pub fn translate_create_domain(
     resolver: &Resolver,
     program: &mut ProgramBuilder,
 ) -> Result<()> {
-    let normalized_name: crate::IdentKey = crate::IdentKey::from_unquoted(domain_name);
+    let normalized_name = crate::IdentKey::from_unquoted(domain_name);
 
     // Reject names that shadow SQLite base types
     let is_base_type = turso_macros::match_ignore_ascii_case!(match normalized_name.as_bytes() {
@@ -2826,7 +2826,7 @@ pub fn translate_create_domain(
     }
 
     // Validate base type exists — must be a primitive or a registered type
-    let base_normalized: crate::IdentKey = crate::IdentKey::from_unquoted(base_type);
+    let base_normalized = crate::IdentKey::from_unquoted(base_type);
     let is_primitive = turso_macros::match_ignore_ascii_case!(match base_normalized.as_bytes() {
         b"INT" | b"INTEGER" | b"REAL" | b"TEXT" | b"BLOB" => true,
         _ => false,
@@ -2883,7 +2883,7 @@ pub fn translate_drop_type(
     resolver: &Resolver,
     program: &mut ProgramBuilder,
 ) -> Result<()> {
-    let normalized_name: crate::IdentKey = crate::IdentKey::from_unquoted(type_name);
+    let normalized_name = crate::IdentKey::from_unquoted(type_name);
     let kind = if is_domain_drop { "domain" } else { "type" };
 
     // Check if type exists
@@ -2997,7 +2997,7 @@ pub fn translate_drop_type(
     // Remove from in-memory schema
     program.emit_insn(Insn::DropType {
         db: MAIN_DB_ID,
-        type_name: String::from(normalized_name),
+        type_name: normalized_name,
     });
 
     program.emit_insn(Insn::SetCookie {

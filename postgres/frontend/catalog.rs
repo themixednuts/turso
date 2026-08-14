@@ -191,8 +191,8 @@ impl Dialect for PostgresDialect {
 pub fn is_catalog_table_name(name: &str) -> bool {
     let name = IdentKeyStr::new(name);
     CATALOG_TABLE_NAMES
-        .binary_search_by(|candidate| IdentKeyStr::new(candidate).cmp(name))
-        .is_ok()
+        .iter()
+        .any(|candidate| name == *candidate)
 }
 
 pub fn encode_pg_schema_sql(sql: &str) -> String {
@@ -3633,18 +3633,6 @@ mod tests {
             assert!(is_catalog_table_name(&name.to_ascii_uppercase()));
         }
         assert!(!is_catalog_table_name("pg_not_a_catalog_table"));
-    }
-
-    #[test]
-    fn catalog_table_names_follow_identifier_sort_order() {
-        for names in CATALOG_TABLE_NAMES.windows(2) {
-            assert!(
-                IdentKeyStr::new(names[0]) < names[1],
-                "{} must sort before {}",
-                names[0],
-                names[1]
-            );
-        }
     }
 
     #[test]

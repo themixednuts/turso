@@ -193,9 +193,9 @@ pub enum SelectTable {
 /// while plain names like "t1" become `QualifiedName::single("t1")`.
 fn table_qualified_name(table: &str) -> ast::QualifiedName {
     if let Some((db, tbl)) = table.split_once('.') {
-        ast::QualifiedName::fullname(ast::Name::from_string(db), ast::Name::from_string(tbl))
+        ast::QualifiedName::fullname(ast::Name::new(db), ast::Name::new(tbl))
     } else {
-        ast::QualifiedName::single(ast::Name::from_string(table))
+        ast::QualifiedName::single(ast::Name::new(table))
     }
 }
 
@@ -205,16 +205,16 @@ fn table_qualified_name(table: &str) -> ast::QualifiedName {
 /// - "db.table.column" → `DoublyQualified(db, table, column)`
 fn column_qualified_expr(name: &str) -> ast::Expr {
     match name.rsplit_once('.') {
-        None => ast::Expr::Id(ast::Name::exact(name.to_owned())),
+        None => ast::Expr::Id(ast::Name::from_unquoted(name)),
         Some((prefix, col)) => {
             if let Some((db, tbl)) = prefix.split_once('.') {
                 ast::Expr::DoublyQualified(
-                    ast::Name::from_string(db),
-                    ast::Name::from_string(tbl),
-                    ast::Name::from_string(col),
+                    ast::Name::new(db),
+                    ast::Name::new(tbl),
+                    ast::Name::new(col),
                 )
             } else {
-                ast::Expr::Qualified(ast::Name::from_string(prefix), ast::Name::from_string(col))
+                ast::Expr::Qualified(ast::Name::new(prefix), ast::Name::new(col))
             }
         }
     }
@@ -388,7 +388,8 @@ impl Select {
                     o.columns
                         .iter()
                         .map(|(name, order)| ast::SortedColumn {
-                            expr: ast::Expr::Id(ast::Name::exact(name.clone())).into_boxed(),
+                            expr: ast::Expr::Id(ast::Name::from_unquoted(name.clone()))
+                                .into_boxed(),
                             order: match order {
                                 SortOrder::Asc => Some(ast::SortOrder::Asc),
                                 SortOrder::Desc => Some(ast::SortOrder::Desc),

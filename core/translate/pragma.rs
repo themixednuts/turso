@@ -75,11 +75,11 @@ fn display_table_list_name(database_id: usize, name: &str) -> String {
 }
 
 fn table_pragma_lookup_name(database_id: usize, name: &str) -> &str {
-    let normalized = crate::IdentKeyStr::new(name);
+    let key = crate::IdentKeyStr::new(name);
     if (database_id == crate::TEMP_DB_ID
-        && (normalized == crate::schema::TEMP_SCHEMA_TABLE_NAME
-            || normalized == crate::schema::TEMP_SCHEMA_TABLE_NAME_ALT))
-        || normalized == crate::schema::SCHEMA_TABLE_NAME_ALT
+        && (key == crate::schema::TEMP_SCHEMA_TABLE_NAME
+            || key == crate::schema::TEMP_SCHEMA_TABLE_NAME_ALT))
+        || key == crate::schema::SCHEMA_TABLE_NAME_ALT
     {
         crate::schema::SCHEMA_TABLE_NAME
     } else {
@@ -117,7 +117,7 @@ fn resolve_index_pragma_database_id(
 
     let qualified_name = ast::QualifiedName {
         db_name: None,
-        name: ast::Name::exact_ref(index_name),
+        name: ast::Name::from_unquoted(index_name),
         alias: None,
     };
     resolver.resolve_existing_index_database_id(&qualified_name)

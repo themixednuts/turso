@@ -122,7 +122,7 @@ impl TempDbContext {
 
 #[derive(Debug, Clone)]
 pub(crate) struct NamedSavepointFrame {
-    pub(crate) name: String,
+    pub(crate) name: crate::IdentKey,
     pub(crate) starts_transaction: bool,
     pub(crate) deferred_fk_violations: isize,
     /// Snapshot of `conn.schema` taken at SAVEPOINT begin. Used by
@@ -2926,9 +2926,9 @@ impl Connection {
     pub fn attached_database_names(&self) -> Vec<String> {
         self.attached_databases
             .read()
-            .name_to_index
-            .keys()
-            .map(ToString::to_string)
+            .name_to_entry
+            .values()
+            .map(|entry| entry.name.clone())
             .collect()
     }
 
@@ -3171,16 +3171,17 @@ impl Connection {
 
     /// Get the database id for a schema name ("main", "temp", or an attached db alias).
     pub(crate) fn get_database_id_by_name(&self, name: &str) -> Result<usize> {
-        match name {
-            name if name.eq_ignore_ascii_case("main") => Ok(MAIN_DB_ID),
-            name if name.eq_ignore_ascii_case("temp") => Ok(TEMP_DB_ID),
-            _ => self
-                .attached_databases
-                .read()
-                .get_database_by_name(name)
-                .map(|(idx, _)| idx)
-                .ok_or_else(|| LimboError::InvalidArgument(format!("no such database: {name}"))),
+        if name.eq_ignore_ascii_case("main") {
+            return Ok(MAIN_DB_ID);
         }
+        if name.eq_ignore_ascii_case("temp") {
+            return Ok(TEMP_DB_ID);
+        }
+        self.attached_databases
+            .read()
+            .get_database_by_name(name)
+            .map(|(idx, _)| idx)
+            .ok_or_else(|| LimboError::InvalidArgument(format!("no such database: {name}")))
     }
 
     /// Get the Database object for a given database id.
@@ -3205,7 +3206,7 @@ impl Connection {
     pub(crate) fn is_attached(&self, alias: &str) -> bool {
         self.attached_databases
             .read()
-            .name_to_index
+            .name_to_entry
             .contains_key(crate::IdentKeyStr::new(alias))
     }
 
@@ -3602,9 +3603,9 @@ impl Connection {
         let database_id = {
             let attached_dbs = self.attached_databases.read();
             match attached_dbs
-                .name_to_index
+                .name_to_entry
                 .get(crate::IdentKeyStr::new(alias))
-                .copied()
+                .map(|entry| entry.index)
             {
                 Some(id) => id,
                 None => {
@@ -3659,9 +3660,9 @@ impl Connection {
     pub fn list_attached_databases(&self) -> Vec<String> {
         self.attached_databases
             .read()
-            .name_to_index
-            .keys()
-            .map(ToString::to_string)
+            .name_to_entry
+            .values()
+            .map(|entry| entry.name.clone())
             .collect()
     }
 
@@ -3810,14 +3811,15 @@ impl Connection {
 
         // Add attached databases
         let attached_dbs = self.attached_databases.read();
-        for (alias, &seq_number) in attached_dbs.name_to_index.iter() {
+        for entry in attached_dbs.name_to_entry.values() {
+            let seq_number = entry.index;
             let file_path = if let Some((db, _pager)) = attached_dbs.index_to_data.get(&seq_number)
             {
                 Self::get_canonical_path_for_database(db)
             } else {
                 String::new()
             };
-            databases.push((seq_number, alias.to_string(), file_path));
+            databases.push((seq_number, entry.name.clone(), file_path));
         }
 
         // Sort by sequence number to ensure consistent ordering
@@ -4883,11 +4885,14 @@ impl Connection {
         )
     }
 
-    pub(crate) fn release_named_savepoint_frame(&self, name: &str) -> SavepointResult {
+    pub(crate) fn release_named_savepoint_frame(
+        &self,
+        name: &crate::IdentKeyStr,
+    ) -> SavepointResult {
         let mut savepoints = self.named_savepoints.write();
         let Some(target_idx) = savepoints
             .iter()
-            .rposition(|savepoint| savepoint.name == name)
+            .rposition(|savepoint| savepoint.name == *name)
         else {
             return SavepointResult::NotFound;
         };
@@ -4898,11 +4903,14 @@ impl Connection {
         SavepointResult::Release
     }
 
-    pub(crate) fn rollback_named_savepoint_frame(&self, name: &str) -> Option<RollbackFrameInfo> {
+    pub(crate) fn rollback_named_savepoint_frame(
+        &self,
+        name: &crate::IdentKeyStr,
+    ) -> Option<RollbackFrameInfo> {
         let mut savepoints = self.named_savepoints.write();
         let target_idx = savepoints
             .iter()
-            .rposition(|savepoint| savepoint.name == name)?;
+            .rposition(|savepoint| savepoint.name == *name)?;
         let frame = &savepoints[target_idx];
         let info = RollbackFrameInfo {
             main_schema_snapshot: frame.main_schema_snapshot.clone(),
@@ -5219,11 +5227,29 @@ mod tests {
     // given a attached 'alias', return the Database and Pager for that attached database
     fn attached_entry(conn: &Connection, alias: &str) -> (Arc<Database>, Arc<Pager>) {
         let catalog = conn.attached_databases.read();
-        let index = *catalog
-            .name_to_index
+        let index = catalog
+            .name_to_entry
             .get(crate::IdentKeyStr::new(alias))
-            .unwrap();
+            .unwrap()
+            .index;
         catalog.index_to_data.get(&index).unwrap().clone()
+    }
+
+    #[test]
+    fn attached_database_aliases_preserve_spelling_and_ignore_ascii_case_for_lookup() {
+        let io: Arc<dyn IO> = Arc::new(MemoryIO::new());
+        let db = Database::open_file(io, ":memory:", Arc::new(SqliteDialect)).unwrap();
+        let conn = db.connect().unwrap();
+
+        drive_attach(&conn, ":memory:attached", "MixedCase").unwrap();
+
+        assert!(conn.is_attached("mixedcase"));
+        assert_eq!(conn.list_attached_databases(), vec!["MixedCase".to_owned()]);
+        assert_eq!(
+            conn.get_database_name_by_index(2).as_deref(),
+            Some("MixedCase")
+        );
+        assert_eq!(conn.list_all_databases()[1].1, "MixedCase");
     }
 
     #[test]

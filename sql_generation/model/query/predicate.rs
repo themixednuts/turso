@@ -75,7 +75,7 @@ impl Predicate {
 
     /// Create a predicate from a column reference
     pub fn column(name: String) -> Self {
-        Self(ast::Expr::Id(ast::Name::exact(name)))
+        Self(ast::Expr::Id(ast::Name::from_unquoted(name)))
     }
 
     /// Create a predicate from a SimValue literal

@@ -50,7 +50,7 @@ fn generate_expr_inner<R: Rng + ?Sized>(
             let (chosen_idx, chosen_col) =
                 compatible_cols[rng.random_range(0..compatible_cols.len())];
             refs.insert(chosen_idx);
-            Expr::Id(Name::from_string(&chosen_col.name))
+            Expr::Id(Name::new(&chosen_col.name))
         } else {
             generate_literal(rng, target_type)
         };
@@ -62,7 +62,7 @@ fn generate_expr_inner<R: Rng + ?Sized>(
         0..=3 => {
             let (idx, col) = compatible_cols[rng.random_range(0..compatible_cols.len())];
             refs.insert(idx);
-            Expr::Id(Name::from_string(&col.name))
+            Expr::Id(Name::new(&col.name))
         }
         // Binary operation
         4..=6 => {
@@ -98,7 +98,7 @@ fn generate_expr_inner<R: Rng + ?Sized>(
                 let (chosen_idx, chosen_col) =
                     compatible_cols[rng.random_range(0..compatible_cols.len())];
                 refs.insert(chosen_idx);
-                Expr::Id(Name::from_string(&chosen_col.name))
+                Expr::Id(Name::new(&chosen_col.name))
             } else {
                 generate_literal(rng, target_type)
             }
@@ -257,16 +257,16 @@ pub fn rename_column_refs_in_expr(expr: &mut Expr, from: &str, to: &str) {
     let from_lower = from.to_ascii_lowercase();
     match expr {
         Expr::Id(name) if name.as_str().to_ascii_lowercase() == from_lower => {
-            *name = Name::exact(to.to_owned());
+            *name = Name::from_unquoted(to);
         }
         Expr::Name(name) if name.as_str().to_ascii_lowercase() == from_lower => {
-            *name = Name::exact(to.to_owned());
+            *name = Name::from_unquoted(to);
         }
         Expr::Qualified(_, col) if col.as_str().to_ascii_lowercase() == from_lower => {
-            *col = Name::exact(to.to_owned());
+            *col = Name::from_unquoted(to);
         }
         Expr::DoublyQualified(_, _, col) if col.as_str().to_ascii_lowercase() == from_lower => {
-            *col = Name::exact(to.to_owned());
+            *col = Name::from_unquoted(to);
         }
         Expr::Binary(lhs, _, rhs) => {
             rename_column_refs_in_expr(lhs, from, to);
@@ -294,9 +294,9 @@ mod tests {
     fn test_extract_column_refs() {
         // Create a simple expression: a + b
         let expr = Expr::Binary(
-            Box::new(Expr::Id(Name::from_string("a"))),
+            Box::new(Expr::Id(Name::new("a"))),
             Operator::Add,
-            Box::new(Expr::Id(Name::from_string("b"))),
+            Box::new(Expr::Id(Name::new("b"))),
         );
         let refs = extract_column_refs(&expr);
         assert!(refs.contains("a"));
@@ -308,9 +308,9 @@ mod tests {
     fn test_extract_column_refs_expr_name() {
         // Test that Expr::Name is also recognized as a column reference
         let expr = Expr::Binary(
-            Box::new(Expr::Name(Name::from_string("a"))),
+            Box::new(Expr::Name(Name::new("a"))),
             Operator::Subtract,
-            Box::new(Expr::Name(Name::from_string("b"))),
+            Box::new(Expr::Name(Name::new("b"))),
         );
         let refs = extract_column_refs(&expr);
         assert!(refs.contains("a"), "Should find column 'a' in Expr::Name");
@@ -322,9 +322,9 @@ mod tests {
     fn test_extract_column_refs_mixed() {
         // Test mixed Expr::Id and Expr::Name
         let expr = Expr::Binary(
-            Box::new(Expr::Id(Name::from_string("a"))),
+            Box::new(Expr::Id(Name::new("a"))),
             Operator::Add,
-            Box::new(Expr::Name(Name::from_string("b"))),
+            Box::new(Expr::Name(Name::new("b"))),
         );
         let refs = extract_column_refs(&expr);
         assert!(refs.contains("a"));
@@ -335,9 +335,9 @@ mod tests {
     #[test]
     fn test_extract_column_refs_normalizes_case() {
         let expr = Expr::Binary(
-            Box::new(Expr::Id(Name::from_string("A"))),
+            Box::new(Expr::Id(Name::new("A"))),
             Operator::Add,
-            Box::new(Expr::Id(Name::from_string("b"))),
+            Box::new(Expr::Id(Name::new("b"))),
         );
         let refs = extract_column_refs(&expr);
         assert!(refs.contains("a"));

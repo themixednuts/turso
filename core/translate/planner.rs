@@ -62,13 +62,13 @@ fn collect_cte_definitions(with: With, program: &mut ProgramBuilder) -> Result<V
     let mut referenced_table_names_by_cte = Vec::with_capacity(with.ctes.len());
 
     for cte in with.ctes {
-        let name = cte.tbl_name.to_key();
         if definitions
             .iter()
-            .any(|definition: &CteDefinition| definition.name == name)
+            .any(|definition: &CteDefinition| cte.tbl_name == definition.name)
         {
             crate::bail_parse_error!("duplicate WITH table name: {}", cte.tbl_name.as_str());
         }
+        let name = cte.tbl_name.into_key();
 
         let mut referenced_table_names = Vec::new();
         collect_from_clause_table_refs(&cte.select, &mut referenced_table_names);
@@ -806,12 +806,14 @@ fn link_with_window(
                     // Named windows store their FRAME clause on the
                     // `NamedWindowDef`. Look it up and validate the
                     // clause as this function's user_frame.
-                    let window_name = name.to_key();
                     let def = named_windows
                         .iter()
-                        .rfind(|d| d.name == window_name)
+                        .rfind(|d| name == &d.name)
                         .ok_or_else(|| {
-                            crate::LimboError::ParseError(format!("no such window: {window_name}"))
+                            crate::LimboError::ParseError(format!(
+                                "no such window: {}",
+                                name.to_key()
+                            ))
                         })?;
                     // `bound` may already be `None` (taken on an earlier
                     // attachment), but the def's order_by length we
@@ -822,7 +824,11 @@ fn link_with_window(
                         Some(b) => b.order_by.len(),
                         None => windows
                             .iter()
-                            .rfind(|w| w.name.as_ref() == Some(&window_name))
+                            .rfind(|w| {
+                                w.name
+                                    .as_ref()
+                                    .is_some_and(|window_name| name == window_name)
+                            })
                             .expect("sister Window exists after def bound was taken")
                             .order_by
                             .len(),
@@ -1022,23 +1028,24 @@ fn resolve_window<'a>(
             Ok(windows.last_mut().expect("just pushed, so must exist"))
         }
         Over::Name(name) => {
-            let window_name = name.to_key();
             // Reuse an existing resolved entry with the same name AND
             // frame so functions sharing one coerced frame fold into one
             // ephemeral-table pass. SQLite uses the most recent
             // definition when names collide, so iterate in reverse.
-            if let Some(idx) = windows
-                .iter()
-                .rposition(|w| w.name.as_ref() == Some(&window_name) && w.frame == frame)
-            {
+            if let Some(idx) = windows.iter().rposition(|w| {
+                w.name
+                    .as_ref()
+                    .is_some_and(|window_name| name == window_name)
+                    && w.frame == frame
+            }) {
                 return Ok(&mut windows[idx]);
             }
             // Need a new resolved entry. Verify the name exists.
             let def = named_windows
                 .iter_mut()
-                .rfind(|d| d.name == window_name)
+                .rfind(|d| name == &d.name)
                 .ok_or_else(|| {
-                    crate::LimboError::ParseError(format!("no such window: {window_name}"))
+                    crate::LimboError::ParseError(format!("no such window: {}", name.to_key()))
                 })?;
             // First attachment under this name takes ownership of the
             // bound exprs. Subsequent distinct-frame
@@ -1049,7 +1056,11 @@ fn resolve_window<'a>(
                 None => {
                     let sister = windows
                         .iter()
-                        .rfind(|w| w.name.as_ref() == Some(&window_name))
+                        .rfind(|w| {
+                            w.name
+                                .as_ref()
+                                .is_some_and(|window_name| name == window_name)
+                        })
                         .expect("sister Window must exist after the named def was taken");
                     NamedWindowBound {
                         partition_by: sister.partition_by.clone(),
@@ -1057,7 +1068,7 @@ fn resolve_window<'a>(
                     }
                 }
             };
-            windows.push(Window::from_named_bound(window_name, bound, frame));
+            windows.push(Window::from_named_bound(name.to_key(), bound, frame));
             Ok(windows.last_mut().expect("just pushed, so must exist"))
         }
     }
@@ -1875,7 +1886,7 @@ fn parse_table(
                 if let (Some(name_str), ast::ResultColumn::Expr(_, ref mut alias)) =
                     (&col.name, result_col)
                 {
-                    *alias = Some(ast::As::As(ast::Name::exact_ref(name_str)));
+                    *alias = Some(ast::As::As(ast::Name::from_unquoted(name_str)));
                 }
             }
         }
@@ -2600,7 +2611,7 @@ fn parse_join(
                         .zip(right_col.name.as_deref())
                         .is_some_and(|(l, r)| l.eq_ignore_ascii_case(r))
                     {
-                        distinct_names.push(ast::Name::exact(
+                        distinct_names.push(ast::Name::from_unquoted(
                             left_col.name.clone().expect("column name is None"),
                         ));
                         found_match = true;
@@ -2646,7 +2657,7 @@ fn parse_join(
             ast::JoinConstraint::Using(distinct_names) => {
                 // USING join is replaced with a list of equality predicates
                 for distinct_name in distinct_names.iter() {
-                    let name_normalized = distinct_name.as_str();
+                    let column_name = distinct_name.as_str();
                     let cur_table_idx = table_references.joined_tables().len() - 1;
                     let left_tables = &table_references.joined_tables()[..cur_table_idx];
                     turso_assert!(!left_tables.is_empty());
@@ -2661,7 +2672,7 @@ fn parse_join(
                             .find(|(_, col)| {
                                 col.name
                                     .as_deref()
-                                    .is_some_and(|name| name.eq_ignore_ascii_case(name_normalized))
+                                    .is_some_and(|name| name.eq_ignore_ascii_case(column_name))
                             })
                             .map(|(idx, col)| {
                                 (left_table_offset, left_table.internal_id, idx, col)
@@ -2679,7 +2690,7 @@ fn parse_join(
                     let right_col = right_table.columns().iter().enumerate().find(|(_, col)| {
                         col.name
                             .as_deref()
-                            .is_some_and(|name| name.eq_ignore_ascii_case(name_normalized))
+                            .is_some_and(|name| name.eq_ignore_ascii_case(column_name))
                     });
                     if right_col.is_none() {
                         crate::bail_parse_error!(

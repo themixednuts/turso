@@ -7,7 +7,8 @@ use turso_ext::{
     ValueDestructor,
 };
 
-use crate::{translate::collate::CollationSeq, LimboError};
+use crate::{translate::collate::CollationSeq, IdentKey, LimboError};
+use turso_parser::ast::{ColumnDefinition, Name};
 
 pub type ContextCollationFunction = unsafe extern "C" fn(
     context: usize,
@@ -1487,17 +1488,28 @@ impl Display for MathFunc {
 
 #[derive(Debug, Clone)]
 pub enum AlterTableFunc {
-    RenameTable,
-    AlterColumn,
-    RenameColumn,
+    RenameTable {
+        from: IdentKey,
+        to: Name,
+    },
+    AlterColumn {
+        table: IdentKey,
+        column: IdentKey,
+        definition: Arc<ColumnDefinition>,
+    },
+    RenameColumn {
+        table: IdentKey,
+        from: IdentKey,
+        to: Name,
+    },
 }
 
 impl Display for AlterTableFunc {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AlterTableFunc::RenameTable => write!(f, "limbo_rename_table"),
-            AlterTableFunc::RenameColumn => write!(f, "limbo_rename_column"),
-            AlterTableFunc::AlterColumn => write!(f, "limbo_alter_column"),
+            AlterTableFunc::RenameTable { .. } => write!(f, "limbo_rename_table"),
+            AlterTableFunc::RenameColumn { .. } => write!(f, "limbo_rename_column"),
+            AlterTableFunc::AlterColumn { .. } => write!(f, "limbo_alter_column"),
         }
     }
 }

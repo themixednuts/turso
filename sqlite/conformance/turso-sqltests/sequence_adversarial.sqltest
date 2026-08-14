@@ -365,8 +365,7 @@ expect error {
     is reserved for internal AUTOINCREMENT use
 }
 
-# Mixed-case spelling of the reserved prefix is rejected after
-# normalize_ident lowercases it.
+# Identifier-key comparison rejects mixed-case spelling of the reserved prefix.
 test create-sequence-rejects-reserved-prefix-case-insensitive {
     CREATE SEQUENCE __TURSO_INTERNAL_AUTOINCREMENT_X;
 }

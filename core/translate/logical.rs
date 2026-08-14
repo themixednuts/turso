@@ -850,7 +850,7 @@ impl<'a> LogicalPlanBuilder<'a> {
                 .iter()
                 .any(|col| col.name == left_col.name)
             {
-                common_columns.push(ast::Name::exact_ref(&left_col.name));
+                common_columns.push(ast::Name::from_unquoted(&left_col.name));
             }
         }
 

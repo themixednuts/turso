@@ -1145,7 +1145,7 @@ pub struct GroupBy {
 /// identifier or string or `CROSS` or `FULL` or `INNER` or `LEFT` or `NATURAL` or `OUTER` or `RIGHT`.
 ///
 /// Two Names are equal if they refer to the same identifier, regardless of
-/// ASCII case or quoting style (e.g. `abort` and `"ABORT"` are the same identifier).
+/// ASCII case or quoting style. `abort` and `"ABORT"` are equal.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Name {
     value: IdentStr,
@@ -1187,52 +1187,36 @@ impl<'de> serde::Deserialize<'de> for Name {
 }
 
 impl Name {
-    /// Create name which will have exactly the value of given string
-    /// (e.g. if s = "\"str\"" - the name value will contain quotes and translation to SQL will give us """str""")
-    pub fn exact(s: String) -> Self {
-        Self::exact_input(s)
-    }
-
-    /// Copies unquoted text into a name, using inline storage when possible.
-    pub fn exact_ref(s: &str) -> Self {
-        Self::exact_input(s)
-    }
-
-    fn exact_input(s: impl Input<BoxStorage>) -> Self {
+    /// Creates a name from identifier text that has already been unquoted.
+    pub fn from_unquoted(s: impl Input<BoxStorage>) -> Self {
         Self {
             value: IdentStr::from_unquoted(s),
         }
     }
+
     /// Parse name from the bytes (e.g. handle quoting and handle escaped quotes)
     pub fn from_bytes(s: &[u8]) -> Self {
-        Self::from_string(unsafe { std::str::from_utf8_unchecked(s) })
+        Self::new(unsafe { std::str::from_utf8_unchecked(s) })
     }
+
     pub const fn empty() -> Self {
         Self {
             value: IdentStr::empty(),
         }
     }
-    /// Create a name parsed from a bracket-quoted identifier (`[name]`),
-    /// remembering the bracket quoting so the name renders back as written.
-    pub fn bracketed(s: String) -> Self {
-        Self::bracketed_input(s)
-    }
 
-    /// Copies bracket-quoted text into a name, using inline storage when possible.
-    pub fn bracketed_ref(s: &str) -> Self {
-        Self::bracketed_input(s)
-    }
-
-    fn bracketed_input(s: impl Input<BoxStorage>) -> Self {
+    /// Creates a name from text inside SQLite bracket quotes.
+    pub fn from_bracketed(s: impl Input<BoxStorage>) -> Self {
         Self {
             value: IdentStr::with_quote(s, Quote::Bracket),
         }
     }
-    /// Parse name from the string (e.g. handle quoting and handle escaped quotes)
-    pub fn from_string(s: impl AsRef<str>) -> Self {
-        let s = s.as_ref();
-        if s.starts_with('[') && s.ends_with(']') {
-            return Self::bracketed(s[1..s.len() - 1].to_owned());
+
+    /// Creates a name from SQL source text, parsing its quote delimiters.
+    pub fn new(s: impl Input<BoxStorage> + AsRef<str>) -> Self {
+        let source = s.as_ref();
+        if source.starts_with('[') && source.ends_with(']') {
+            return Self::from_bracketed(&source[1..source.len() - 1]);
         }
         Self {
             value: IdentStr::new(s),
@@ -1254,6 +1238,13 @@ impl Name {
 
     /// Returns an owned, ASCII-case-folded key for identifier maps and sets.
     pub fn to_key(&self) -> IdentKey {
+        self.value.to_key()
+    }
+
+    /// Consumes this name and returns an owned identifier key.
+    ///
+    /// This conversion may allocate.
+    pub fn into_key(self) -> IdentKey {
         self.value.to_key()
     }
 
@@ -1320,25 +1311,63 @@ impl PartialEq<String> for Name {
     }
 }
 
+impl PartialEq<IdentKey> for Name {
+    fn eq(&self, other: &IdentKey) -> bool {
+        self.value == *other
+    }
+}
+
+impl PartialEq<&IdentKey> for Name {
+    fn eq(&self, other: &&IdentKey) -> bool {
+        self.value == **other
+    }
+}
+
+impl PartialEq<IdentKeyStr> for Name {
+    fn eq(&self, other: &IdentKeyStr) -> bool {
+        self.value == *other
+    }
+}
+
+impl PartialEq<&IdentKeyStr> for Name {
+    fn eq(&self, other: &&IdentKeyStr) -> bool {
+        self.value == **other
+    }
+}
+
+impl From<IdentKey> for Name {
+    fn from(value: IdentKey) -> Self {
+        if value.is_inline() {
+            Self::from_unquoted(value.as_str())
+        } else {
+            Self::from_unquoted(Box::<str>::from(value))
+        }
+    }
+}
+
 #[cfg(test)]
 mod name_tests {
     use super::Name;
+    use crate::{IdentKey, IdentKeyStr};
 
     #[test]
     fn names_compare_by_sqlite_identifier_rules() {
-        let lower = Name::exact("users".to_owned());
-        let quoted_upper = Name::from_string("\"USERS\"");
+        let lower = Name::from_unquoted("users");
+        let quoted_upper = Name::new("\"USERS\"");
+        let owned_key = lower.to_key();
 
         assert_eq!(lower, quoted_upper);
         assert_eq!(lower, "UsErS");
-        assert_ne!(Name::exact("É".to_owned()), Name::exact("é".to_owned()));
+        assert_eq!(quoted_upper, owned_key);
+        assert_eq!(quoted_upper, IdentKeyStr::new("users"));
+        assert_ne!(Name::from_unquoted("É"), Name::from_unquoted("é"));
     }
 
     #[test]
     fn equal_names_have_equal_hashes() {
         let mut names = std::collections::HashSet::new();
-        names.insert(Name::exact("users".to_owned()));
-        names.insert(Name::from_string("`USERS`"));
+        names.insert(Name::from_unquoted("users"));
+        names.insert(Name::new("`USERS`"));
 
         assert_eq!(names.len(), 1);
     }
@@ -1346,8 +1375,8 @@ mod name_tests {
     #[test]
     fn short_parsed_names_use_inline_storage() {
         let parsed = Name::from_bytes(b"users");
-        let exact = Name::exact_ref("users");
-        let bracketed = Name::bracketed_ref("users");
+        let exact = Name::from_unquoted("users");
+        let bracketed = Name::from_bracketed("users");
 
         assert!(parsed.value.is_inline());
         assert!(parsed.to_key().is_inline());
@@ -1356,22 +1385,39 @@ mod name_tests {
     }
 
     #[test]
+    fn owned_name_input_reuses_spilled_storage() {
+        let source = Box::<str>::from("this_identifier_name_is_long_enough_to_spill");
+        let source_ptr = source.as_ptr();
+        let name = Name::new(source);
+
+        assert_eq!(name.as_str().as_ptr(), source_ptr);
+
+        let key = IdentKey::from_unquoted("this_identifier_key_is_long_enough_to_spill");
+        let key_ptr = key.as_ptr();
+        let name = Name::from(key);
+
+        assert_eq!(name.as_str().as_ptr(), key_ptr);
+    }
+
+    #[test]
     fn names_provide_case_insensitive_map_keys() {
         let mut names = std::collections::HashMap::new();
-        names.insert(Name::from_string("\"Users\"").to_key(), 1);
+        names.insert(Name::new("\"Users\"").into_key(), 1);
 
         assert_eq!(
-            names.get(Name::exact("USERS".to_owned()).as_key_str()),
+            names.get(Name::from_unquoted("USERS").as_key_str()),
             Some(&1)
         );
     }
 
     #[test]
     fn name_rendering_preserves_quote_style() {
-        assert_eq!(Name::from_string("\"a\"\"b\"").as_ident(), "\"a\"\"b\"");
-        assert_eq!(Name::from_string("`a``b`").as_ident(), "`a``b`");
-        assert_eq!(Name::bracketed_ref("a b").as_ident(), "[a b]");
-        assert_eq!(Name::bracketed_ref("a]b").as_ident(), "\"a]b\"");
+        assert_eq!(Name::new("\"a\"\"b\"").as_ident(), "\"a\"\"b\"");
+        assert_eq!(Name::new("`a``b`").as_ident(), "`a``b`");
+        assert_eq!(Name::new("[a b]").as_ident(), "[a b]");
+        assert_eq!(Name::from_unquoted("\"a\"").as_str(), "\"a\"");
+        assert_eq!(Name::from_bracketed("a b").as_ident(), "[a b]");
+        assert_eq!(Name::from_bracketed("a]b").as_ident(), "\"a]b\"");
     }
 }
 

@@ -1,9 +1,16 @@
 use clap::Args;
 use clap_complete::{ArgValueCompleter, PathCompleter};
+use csv::StringRecord;
 use std::{fs::File, io::Write, path::PathBuf, sync::Arc};
-use turso_core::{Connection, LimboError};
+use turso_core::{quote_identifier, Connection, LimboError};
 
-type IdentKey = identstr::Key<identstr::policy::Ascii>;
+fn format_csv_columns(header: &StringRecord) -> String {
+    header
+        .iter()
+        .map(quote_identifier)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 #[derive(Debug, Clone, Args)]
 pub struct ImportArgs {
@@ -87,11 +94,7 @@ impl<'a> ImportFile<'a> {
         // If table doesn't exist, use first row as header to create table
         if !table_exists {
             if let Some(Ok(header)) = records.next() {
-                let columns = header
-                    .iter()
-                    .map(|identifier| String::from(IdentKey::new(identifier)))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let columns = format_csv_columns(&header);
                 let create_table = format!("CREATE TABLE {} ({});", args.table, columns);
 
                 let rows = match self.conn.query(create_table) {
@@ -259,5 +262,27 @@ impl<'a> ImportFile<'a> {
                 .as_bytes(),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn csv_headers_are_quoted_as_raw_identifier_text() {
+        let header = StringRecord::from(vec![
+            "plain",
+            "Mixed Case",
+            "'total'",
+            "say \"hi\"",
+            "select",
+        ]);
+        let columns = format_csv_columns(&header);
+
+        assert_eq!(
+            columns,
+            r#"plain, "Mixed Case", "'total'", "say ""hi""", "select""#
+        );
     }
 }
